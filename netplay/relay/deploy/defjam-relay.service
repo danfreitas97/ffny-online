@@ -13,7 +13,7 @@ Type=simple
 #   useradd --system --no-create-home --shell /usr/sbin/nologin defjam-relay
 User=defjam-relay
 Group=defjam-relay
-ExecStart=/usr/local/bin/defjam-relay -listen :27777 -max-rooms 512 -max-clients 1024 -log-interval 60s
+ExecStart=/opt/defjam-relay/relay -listen :27777 -max-rooms 512 -max-clients 1024 -log-interval 60s
 Restart=on-failure
 RestartSec=2s
 # The relay keeps no state on disk and needs no privileges (port > 1024).

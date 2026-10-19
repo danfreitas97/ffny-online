@@ -96,7 +96,7 @@ location close to the players. Below, `SERVER` is the server's public IP.
 4. **Install them** on the server:
 
    ```sh
-   install -m 0755 -o root -g root /tmp/relay /usr/local/bin/defjam-relay
+   install -d -m 0755 /opt/defjam-relay && install -m 0755 -o root -g root /tmp/relay /opt/defjam-relay/relay
    install -m 0644 -o root -g root /tmp/defjam-relay.service /etc/systemd/system/defjam-relay.service
    rm /tmp/relay /tmp/defjam-relay.service
    systemctl daemon-reload
@@ -114,7 +114,7 @@ location close to the players. Below, `SERVER` is the server's public IP.
    ufw status
    ```
 
-   If the server also has a **Hetzner Cloud Firewall** attached (console → Firewalls),
+   If the server also has a **Hetzner Cloud Firewall** attached (console â†’ Firewalls),
    add an inbound rule there too: UDP, port 27777, any source.
 
 6. **Check it from a PC** with the probe (in `netplay/relay` on the PC):
@@ -148,7 +148,7 @@ Build a new `dist/relay` on the PC, then:
 
 ```sh
 scp dist/relay root@SERVER:/tmp/relay
-ssh root@SERVER 'install -m 0755 /tmp/relay /usr/local/bin/defjam-relay && rm /tmp/relay && systemctl restart defjam-relay'
+ssh root@SERVER 'install -m 0755 /tmp/relay /opt/defjam-relay/relay && rm /tmp/relay && systemctl restart defjam-relay'
 ```
 
 All state is in memory: a restart ends every room. Clients get `ERROR 7` on their next
@@ -163,10 +163,10 @@ Shutdown on `SIGTERM`/`SIGINT` (what `systemctl stop` sends) is clean.
 - **CPU:** negligible. One core handles far more than 1024 clients at 120 messages/s.
 - **Bandwidth:** each client may send up to 400 messages/s; a 60 Hz game with
   redundancy sends about 60-120. At 120 messages/s with ~80-byte payloads, one room
-  costs about 30 KB/s in and 30 KB/s out (≈0.5 Mbit/s, ≈200 MB per hour of play).
+  costs about 30 KB/s in and 30 KB/s out (â‰ˆ0.5 Mbit/s, â‰ˆ200 MB per hour of play).
   512 full rooms would be about 250 Mbit/s. Check the plan's included traffic (20 TB a
   month in Hetzner's EU locations at the time of writing, roughly 90 000 room-hours).
-- **Disk:** the binary (≈2.5 MB) and the journal.
+- **Disk:** the binary (â‰ˆ2.5 MB) and the journal.
 
 ## Spec interpretations
 
