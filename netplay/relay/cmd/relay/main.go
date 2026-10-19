@@ -11,19 +11,74 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"syscall"
 	"time"
 
 	"defjam/netplay/relay"
 )
 
+// updateName is the only shape of path the update service answers: one plain
+// file name in the update folder, never a sub-folder or a dot-dot.
+var updateName = regexp.MustCompile(`^/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`)
+
+// serveUpdates answers GET and HEAD for the files in dir (latest.json, its
+// signature and the setups it names) and nothing else. The launcher checks the
+// signature itself, so plain HTTP is enough here: the files are public and a
+// tampered one is refused by every client.
+func serveUpdates(ctx context.Context, listen, dir string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !updateName.MatchString(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		path := filepath.Join(dir, r.URL.Path[1:])
+		st, err := os.Stat(path)
+		if err != nil || !st.Mode().IsRegular() {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		http.ServeFile(w, r, path)
+	})
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Minute, // a setup of ~55 MB on a slow line
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    8 << 10,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdown)
+	}()
+	log.Printf("relay: update files from %s on http %s", dir, listen)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("relay: update service stopped: %v", err)
+	}
+}
+
 func main() {
 	listen := flag.String("listen", fmt.Sprintf(":%d", relay.DefaultPort), "UDP address to listen on")
 	maxRooms := flag.Int("max-rooms", 512, "maximum number of open rooms")
 	maxClients := flag.Int("max-clients", 1024, "maximum number of connected clients")
 	logInterval := flag.Duration("log-interval", 60*time.Second, "period of the summary log line (0 disables)")
+	updatesListen := flag.String("updates-listen", "", "TCP address for the launcher's update files, e.g. :27778 (empty: off)")
+	updatesDir := flag.String("updates-dir", "", "folder holding latest.json, latest.json.sig and the setups")
 	flag.Parse()
 
 	if *maxRooms < 1 || *maxClients < 2 {
@@ -59,6 +114,9 @@ func main() {
 
 	log.Printf("relay: protocol v%d listening on %s (max-rooms=%d max-clients=%d)",
 		relay.Version, conn.LocalAddr(), *maxRooms, *maxClients)
+	if *updatesListen != "" && *updatesDir != "" {
+		go serveUpdates(ctx, *updatesListen, *updatesDir)
+	}
 	if err := srv.Serve(ctx, conn); err != nil {
 		log.Fatalf("relay: %v", err)
 	}
