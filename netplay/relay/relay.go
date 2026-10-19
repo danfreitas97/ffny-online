@@ -18,14 +18,22 @@ type Config struct {
 	MaxRooms          int           // rooms open at once (default 512); beyond: ERROR 5
 	MaxClients        int           // clients registered at once (default 1024); beyond: ERROR 5
 	IdleTimeout       time.Duration // a client silent this long is removed (default 15 s)
-	RoomExpiry        time.Duration // a room that never got a second player is deleted after this (default 10 min)
+	RoomExpiry        time.Duration // a legacy room that never got a second player is deleted after this (default 10 min)
 	HellosPerMinute   int           // HELLOs per source IP per sliding minute (default 10); beyond: ERROR 6
 	MsgsPerSecond     int           // datagrams per source IP per second (default 400); beyond: silent drop
 	MaxTrackedSources int           // size cap of the per-IP rate-limit table (default 100000)
+	VoteTime          time.Duration // length of the venue vote (default 15 s)
+	PlayTimeout       time.Duration // a match without every OVER returns to the lobby after this (default 30 min)
 
-	// Rand is the randomness source for room codes, tokens and the log salt.
-	// Default: crypto/rand.Reader. Tests may inject a deterministic reader.
+	// Rand is the randomness source for room codes, tokens, match seeds and
+	// the log salt. Default: crypto/rand.Reader. Tests may inject a
+	// deterministic reader.
 	Rand io.Reader
+
+	// Intn returns a uniform random integer in [0, n) for n >= 2; it draws the
+	// vote candidates and breaks ties. Default: unbiased draws from Rand.
+	// Tests may inject a scripted function.
+	Intn func(n int) int
 
 	// Logf receives one line per room event. Nil disables event logging.
 	Logf func(format string, args ...any)
@@ -53,8 +61,17 @@ func (c *Config) setDefaults() {
 	if c.MaxTrackedSources <= 0 {
 		c.MaxTrackedSources = 100000
 	}
+	if c.VoteTime <= 0 {
+		c.VoteTime = 15 * time.Second
+	}
+	if c.PlayTimeout <= 0 {
+		c.PlayTimeout = 30 * time.Minute
+	}
 	if c.Rand == nil {
 		c.Rand = rand.Reader
+	}
+	if c.Intn == nil {
+		c.Intn = readerIntn(c.Rand)
 	}
 	if c.Logf == nil {
 		c.Logf = func(string, ...any) {}
@@ -73,7 +90,8 @@ type Stats struct {
 	PacketsOut, BytesOut uint64 // every datagram the relay asked to send
 	// Dropped counts received datagrams that caused nothing to be sent:
 	// malformed, rate-limited, unknown token after the first ERROR 7, DATA
-	// while alone in the room, BYE of a lone player.
+	// while alone in the room or in the lobby, BYE or LEAVE that nobody had
+	// to be told about.
 	Dropped uint64
 }
 
@@ -81,21 +99,42 @@ type Stats struct {
 type client struct {
 	addr     netip.AddrPort // source address and port; part of the identity
 	token    Token
-	slot     uint8
+	slot     uint8 // SlotNone while in the lobby
 	name     string
-	room     *room
+	build    Build
+	room     *room // nil while in the lobby
 	lastSeen time.Time
 	id       string // anonymised address, for logs only
 	welcome  []byte // the encoded WELCOME, re-sent on a repeated HELLO
+
+	// lobby is set once the client has shown it speaks the lobby extension
+	// (HELLO mode 2, or any lobby request). Only such clients get ROOM and START.
+	lobby   bool
+	ready   bool
+	fighter uint8 // from the last READY; FighterNone before
+	vote    uint8 // candidate index, or VoteNone
+	over    bool  // sent OVER for the current match
 }
 
-// room pairs up to two clients.
+// room holds up to MaxSlots clients.
 type room struct {
 	code     RoomCode
 	build    Build
-	slots    [2]*client
+	slots    [MaxSlots]*client
 	created  time.Time
-	everFull bool // a second player has joined at some point
+	seq      uint64 // creation order, for "newest first" and "oldest"
+	everFull bool   // a second player has joined at some point
+
+	// legacy rooms come from HELLO mode 0: two players, joined in slot 1 only,
+	// fixed settings, and they expire when no second player ever came.
+	legacy   bool
+	settings RoomSettings
+
+	phase      uint8
+	candidates []uint8   // phases 1 and 2: the venues voted on
+	voteEnd    time.Time // phase 1
+	playStart  time.Time // phase 2
+	start      []byte    // phase 2: the encoded START, re-sent on a late VOTE
 }
 
 // source is the rate-limit state of one source IP (IPv6: one /64).
@@ -126,6 +165,7 @@ type Relay struct {
 	salt    [16]byte // per-process salt for anonymised log ids
 	stats   Stats
 	lastGC  time.Time
+	roomSeq uint64
 }
 
 // NewRelay builds a state machine with the given limits.
@@ -195,15 +235,23 @@ func (r *Relay) handle(now time.Time, from netip.AddrPort, b []byte) []Packet {
 			return out
 		}
 		c.lastSeen = now
-		peer := c.room.slots[1-c.slot]
-		if peer == nil {
-			return nil // nobody to forward to yet
+		if c.room == nil {
+			return nil // in the lobby: nobody to forward to
 		}
-		data, err := Encode(ServerData{From: c.slot, Payload: m.Payload})
-		if err != nil {
-			return nil
+		// Forwarded to every other member of the room, whatever its phase.
+		var data []byte
+		for _, o := range c.room.members() {
+			if o == c {
+				continue
+			}
+			if data == nil {
+				if data, err = Encode(ServerData{From: c.slot, Payload: m.Payload}); err != nil {
+					return nil
+				}
+			}
+			out = append(out, Packet{To: o.addr, Data: data})
 		}
-		return []Packet{{To: peer.addr, Data: data}}
+		return out // empty while alone in the room
 	case Ping:
 		c, out := r.auth(now, from, src, m.Token, len(b))
 		if c == nil {
@@ -216,20 +264,28 @@ func (r *Relay) handle(now time.Time, from netip.AddrPort, b []byte) []Packet {
 		if c == nil {
 			return out
 		}
-		return r.removeClient(c, "bye")
+		return r.removeClient(now, c, "bye")
+	case lobbyRequest:
+		c, out := r.auth(now, from, src, m.token(), len(b))
+		if c == nil {
+			return out
+		}
+		c.lastSeen = now
+		c.lobby = true
+		return r.lobbyRequest(now, c, m, len(b))
 	}
 	return nil
 }
 
-// hello handles HELLO: an idempotent re-send, a create, or a join.
+// hello handles HELLO: an idempotent re-send, a create, a join, or a lobby entry.
 func (r *Relay) hello(now time.Time, from netip.AddrPort, src *source, h Hello, reqLen int) []Packet {
 	// A repeated HELLO from an address that already has a token gets the same
-	// WELCOME (and the PEER, if the room is full, since that may have been lost
-	// too). It is not counted against the HELLO rate limit.
+	// WELCOME (and the PEER, if the room of two is full, since that may have
+	// been lost too). It is not counted against the HELLO rate limit.
 	if c := r.clients[from]; c != nil {
 		c.lastSeen = now
 		out := []Packet{{To: from, Data: c.welcome}}
-		if p := c.room.slots[1-c.slot]; p != nil {
+		if p := c.pairPeer(); p != nil {
 			out = append(out, Packet{To: from, Data: mustEncode(Peer{Slot: p.slot, Name: p.name})})
 		}
 		return out
@@ -254,17 +310,18 @@ func (r *Relay) hello(now time.Time, from netip.AddrPort, src *source, h Hello, 
 		if len(r.rooms) >= r.cfg.MaxRooms {
 			return r.errorTo(from, ErrServerFull, reqLen)
 		}
-		code, err := r.newRoomCode()
+		// A legacy room: two players, not listed, named after the host, one venue.
+		settings := RoomSettings{Name: h.Name, Public: 0, Mode: 0, Max: 2, Rounds: 0, Pool: []uint8{1}}
+		rm, err := r.newRoom(now, h.Build, settings, true)
 		if err != nil {
 			return nil
 		}
-		rm := &room{code: code, build: h.Build, created: now}
-		c, err := r.newClient(now, from, rm, SlotHost, h.Name)
+		c, err := r.newClient(now, from, h, rm, SlotHost)
 		if err != nil {
+			delete(r.rooms, rm.code)
 			return nil
 		}
-		r.rooms[code] = rm
-		r.cfg.Logf("room %s created by c=%s", code, c.id)
+		r.cfg.Logf("room %s created by c=%s", rm.code, c.id)
 		return []Packet{{To: from, Data: c.welcome}}
 
 	case ModeJoin:
@@ -272,41 +329,44 @@ func (r *Relay) hello(now time.Time, from netip.AddrPort, src *source, h Hello, 
 		if rm == nil {
 			return r.errorTo(from, ErrRoomNotFound, reqLen)
 		}
-		// HELLO mode 1 joins as slot 1 only. If the guest slot is taken the
-		// room is full, even when the host has left (see README).
-		if rm.slots[SlotGuest] != nil {
-			return r.errorTo(from, ErrRoomFull, reqLen)
+		// In a legacy room HELLO mode 1 joins as slot 1 only: if the guest slot
+		// is taken the room is full, even when the host has left (see README).
+		slot, code := rm.joinable(h.Build)
+		if code != 0 {
+			return r.errorTo(from, code, reqLen)
 		}
-		if subtle.ConstantTimeCompare(rm.build[:], h.Build[:]) != 1 {
-			return r.errorTo(from, ErrBuildMismatch, reqLen)
-		}
-		c, err := r.newClient(now, from, rm, SlotGuest, h.Name)
+		c, err := r.newClient(now, from, h, rm, slot)
 		if err != nil {
 			return nil
 		}
-		rm.everFull = true
-		r.cfg.Logf("room %s joined by c=%s", rm.code, c.id)
+		return append([]Packet{{To: from, Data: c.welcome}}, r.joined(now, rm, c)...)
 
-		out := []Packet{{To: from, Data: c.welcome}}
-		if host := rm.slots[SlotHost]; host != nil {
-			out = append(out,
-				Packet{To: from, Data: mustEncode(Peer{Slot: host.slot, Name: host.name})},
-				Packet{To: host.addr, Data: mustEncode(Peer{Slot: c.slot, Name: c.name})},
-			)
+	case ModeLobby:
+		c, err := r.newClient(now, from, h, nil, SlotNone)
+		if err != nil {
+			return nil
 		}
-		return out
+		c.lobby = true
+		r.cfg.Logf("lobby entered by c=%s", c.id)
+		return []Packet{{To: from, Data: c.welcome}}
 	}
 	return nil
 }
 
-// newClient registers a client in slot of rm with a fresh random token.
-func (r *Relay) newClient(now time.Time, from netip.AddrPort, rm *room, slot uint8, name string) (*client, error) {
-	c := &client{addr: from, slot: slot, name: name, room: rm, lastSeen: now, id: r.anon(from)}
+// newClient registers a client with a fresh random token, in slot of rm, or
+// in the lobby when rm is nil.
+func (r *Relay) newClient(now time.Time, from netip.AddrPort, h Hello, rm *room, slot uint8) (*client, error) {
+	c := &client{addr: from, slot: SlotNone, name: h.Name, build: h.Build, lastSeen: now, id: r.anon(from),
+		fighter: FighterNone, vote: VoteNone}
 	if _, err := io.ReadFull(r.cfg.Rand, c.token[:]); err != nil {
 		return nil, err
 	}
-	c.welcome = mustEncode(Welcome{Token: c.token, Slot: slot, Room: rm.code})
-	rm.slots[slot] = c
+	var code RoomCode
+	if rm != nil {
+		code = rm.code
+		rm.place(c, slot)
+	}
+	c.welcome = mustEncode(Welcome{Token: c.token, Slot: slot, Room: code})
 	r.clients[from] = c
 	return c, nil
 }
@@ -324,32 +384,31 @@ func (r *Relay) auth(now time.Time, from netip.AddrPort, src *source, tok Token,
 	return nil, r.errorTo(from, ErrUnknownToken, reqLen)
 }
 
-// removeClient takes c out of its room, tells the remaining player (PEER with
-// an empty name) and deletes the room if it is now empty.
-func (r *Relay) removeClient(c *client, reason string) []Packet {
+// removeClient unregisters c, taking it out of its room first (see leaveRoom).
+func (r *Relay) removeClient(now time.Time, c *client, reason string) []Packet {
 	delete(r.clients, c.addr)
-	rm := c.room
-	rm.slots[c.slot] = nil
-	r.cfg.Logf("room %s peer left c=%s slot=%d reason=%s", rm.code, c.id, c.slot, reason)
-	if other := rm.slots[1-c.slot]; other != nil {
-		return []Packet{{To: other.addr, Data: mustEncode(Peer{Slot: c.slot, Name: ""})}}
+	if c.room == nil {
+		r.cfg.Logf("lobby left by c=%s reason=%s", c.id, reason)
+		return nil
 	}
-	delete(r.rooms, rm.code)
-	r.cfg.Logf("room %s closed (empty)", rm.code)
-	return nil
+	return r.leaveRoom(now, c, reason)
 }
 
-// Tick runs the timers: idle clients, rooms that never got a second player,
-// and garbage collection of the per-IP table. Call it about once a second.
+// Tick runs the timers: idle clients, legacy rooms that never got a second
+// player, the vote countdown, the playing timeout, and garbage collection of
+// the per-IP table. Call it about once a second.
 func (r *Relay) Tick(now time.Time) []Packet {
 	var out []Packet
 	for _, c := range r.clients {
 		if now.Sub(c.lastSeen) >= r.cfg.IdleTimeout {
-			out = append(out, r.removeClient(c, "timeout")...)
+			out = append(out, r.removeClient(now, c, "timeout")...)
 		}
 	}
+	for _, rm := range r.rooms {
+		out = append(out, r.tickRoom(now, rm)...)
+	}
 	for code, rm := range r.rooms {
-		if rm.everFull || now.Sub(rm.created) < r.cfg.RoomExpiry {
+		if !rm.legacy || rm.everFull || now.Sub(rm.created) < r.cfg.RoomExpiry {
 			continue
 		}
 		for i, c := range rm.slots {
@@ -466,6 +525,18 @@ func (r *Relay) newRoomCode() (RoomCode, error) {
 		}
 	}
 	return code, errNoRoomCode
+}
+
+// newRoom opens a room with a fresh code. The caller places the first client.
+func (r *Relay) newRoom(now time.Time, b Build, s RoomSettings, legacy bool) (*room, error) {
+	code, err := r.newRoomCode()
+	if err != nil {
+		return nil, err
+	}
+	r.roomSeq++
+	rm := &room{code: code, build: b, created: now, seq: r.roomSeq, legacy: legacy, settings: s.clone()}
+	r.rooms[code] = rm
+	return rm, nil
 }
 
 // anon returns a short salted hash of the address for logs, so log lines can

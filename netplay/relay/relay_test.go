@@ -54,8 +54,13 @@ func (h *harness) sendRaw(from netip.AddrPort, b []byte) []got {
 			h.t.Fatalf("relay produced an undecodable datagram % x: %v", p.Data, err)
 		}
 		// Replies to the sender may never be larger than the request, except
-		// PEER and DATA, which only go to registered clients.
-		if p.To == from && m.Type() != TypePeer && m.Type() != TypeData && len(p.Data) > len(b) {
+		// PEER and DATA, which only go to registered clients, and the lobby
+		// replies ROOMS, ROOM and START, which must go to a registered client.
+		lobbyReply := m.Type() == TypeRooms || m.Type() == TypeRoom || m.Type() == TypeStart
+		if lobbyReply && h.r.clients[p.To] == nil {
+			h.t.Fatalf("%T sent to unregistered %v", m, p.To)
+		}
+		if p.To == from && m.Type() != TypePeer && m.Type() != TypeData && !lobbyReply && len(p.Data) > len(b) {
 			h.t.Fatalf("amplification: %d-byte %T reply to a %d-byte request", len(p.Data), m, len(b))
 		}
 		res = append(res, got{p.To, m})

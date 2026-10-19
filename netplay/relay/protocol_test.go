@@ -136,7 +136,7 @@ func TestDecodeClientMalformed(t *testing.T) {
 		"server PONG":      cat(hdr(TypePong), []byte{1, 2, 3, 4}),
 		"server PEER":      cat(hdr(TypePeer), []byte{0, 0}),
 		"server ERROR":     cat(hdr(TypeError), []byte{7, 0}),
-		"hello mode 2":     cat(hdr(TypeHello), []byte{2}, make([]byte, 6), build[:], []byte{1, 'a'}),
+		"hello mode 3":     cat(hdr(TypeHello), []byte{3}, make([]byte, 6), build[:], []byte{1, 'a'}),
 		"hello no name":    cat(hdr(TypeHello), []byte{0}, make([]byte, 6), build[:]),
 		"hello short name": hello[:len(hello)-1],
 		"hello long name":  append(append([]byte(nil), hello...), 'd'),

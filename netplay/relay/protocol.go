@@ -1,11 +1,12 @@
 // Package relay implements the Def Jam: Fight for NY netplay relay, protocol
-// version 1, as specified in docs/netplay-protocol.md.
+// version 1 with the lobby extension, as specified in docs/netplay-protocol.md.
 //
 // The package has three layers:
 //
-//   - protocol.go: encoding and decoding of the wire messages (no state).
-//   - relay.go:    the room/client state machine. It never touches a socket and
-//     takes the current time as an argument, so it is fully testable.
+//   - protocol.go, protocol_lobby.go: encoding and decoding of the wire
+//     messages (no state).
+//   - relay.go, lobby.go: the room/client state machine. It never touches a
+//     socket and takes the current time as an argument, so it is fully testable.
 //   - server.go:   the UDP loop that feeds datagrams to the state machine and
 //     sends what it returns.
 package relay
@@ -49,7 +50,7 @@ const (
 	TypeError   MsgType = 0x08 // server -> client
 )
 
-// HELLO modes.
+// HELLO modes (ModeLobby = 2 is in protocol_lobby.go).
 const (
 	ModeCreate uint8 = 0
 	ModeJoin   uint8 = 1
@@ -83,6 +84,8 @@ var ErrorText = map[uint8]string{
 	ErrServerFull:    "server full",
 	ErrRateLimited:   "rate limited",
 	ErrUnknownToken:  "unknown token",
+	ErrNotAllowed:    "not allowed",
+	ErrRoomState:     "in room/lobby",
 }
 
 // Token is the 8-byte session token the server hands out in WELCOME.
@@ -304,7 +307,8 @@ func readTrailingString(body []byte) (string, bool) {
 	return string(body[1:]), true
 }
 
-// DecodeClient parses a client-to-server datagram (HELLO, DATA, PING, BYE).
+// DecodeClient parses a client-to-server datagram (HELLO, DATA, PING, BYE and
+// the lobby requests LIST, CREATE, JOIN, QUICK, SETTINGS, READY, VOTE, LEAVE, OVER).
 // Lengths must be exact. Slices in the result (ClientData.Payload) alias b.
 //
 // A HELLO whose name length is 0 or above 24, or whose name is not UTF-8, is
@@ -323,7 +327,7 @@ func DecodeClient(b []byte) (Message, error) {
 		}
 		var h Hello
 		h.Mode = body[0]
-		if h.Mode != ModeCreate && h.Mode != ModeJoin {
+		if h.Mode != ModeCreate && h.Mode != ModeJoin && h.Mode != ModeLobby {
 			return nil, ErrMalformed
 		}
 		copy(h.Room[:], body[1:7])
@@ -357,12 +361,15 @@ func DecodeClient(b []byte) (Message, error) {
 		var y Bye
 		copy(y.Token[:], body)
 		return y, nil
+	case TypeList, TypeCreate, TypeJoin, TypeQuick, TypeSettings, TypeReady, TypeVote, TypeLeave, TypeOver:
+		return decodeLobbyClient(t, body)
 	}
 	return nil, ErrMalformed
 }
 
 // DecodeServer parses a server-to-client datagram (WELCOME, PEER, DATA, PONG,
-// ERROR). Used by clients and tests. Slices in the result alias b.
+// ERROR, ROOMS, ROOM, START). Used by clients and tests. ServerData.Payload
+// aliases b; the lobby messages' slices are copies.
 func DecodeServer(b []byte) (Message, error) {
 	t, body, err := checkHeader(b)
 	if err != nil {
@@ -406,6 +413,8 @@ func DecodeServer(b []byte) (Message, error) {
 			return nil, ErrMalformed
 		}
 		return Error{Code: body[0], Text: text}, nil
+	case TypeRooms, TypeRoom, TypeStart:
+		return decodeLobbyServer(t, body)
 	}
 	return nil, ErrMalformed
 }

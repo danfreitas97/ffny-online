@@ -1,17 +1,21 @@
 // Command relayprobe is a small test client for the netplay relay. It speaks
-// protocol version 1 and is meant for checking a deployed server from a PC.
+// protocol version 1 with the lobby extension and is meant for checking a
+// deployed server from a PC.
 //
 // Modes:
 //
 //	relayprobe -server relay.example.net:27777                 # pair (default): two clients in one process
 //	relayprobe -server HOST:27777 -mode create                 # create a room, print its code, wait for a peer
 //	relayprobe -server HOST:27777 -mode join -room ABCDEF      # join that room from another machine
+//	relayprobe -server HOST:27777 -mode lobby                  # lobby flow: two clients, create, list, join, ready, vote, START
 //
 // In every mode it pings once a second and prints the round-trip time from
 // PING/PONG, sends -n DATA packets once a peer is present, and prints every
 // message that arrives. Pair mode checks the whole flow (create, join, PEER,
 // DATA both ways, PING/PONG, BYE, peer-left, ERROR 7 for a dead token) and
-// exits non-zero on any failure.
+// exits non-zero on any failure. Lobby mode checks the lobby extension the
+// same way: HELLO mode 2 twice, a public CREATE, LIST, JOIN, READY from both,
+// VOTE from both, START on both (same seed and venue), OVER back to the lobby.
 package main
 
 import (
@@ -31,7 +35,7 @@ import (
 
 func main() {
 	server := flag.String("server", fmt.Sprintf("127.0.0.1:%d", relay.DefaultPort), "relay address host:port")
-	mode := flag.String("mode", "pair", "pair | create | join")
+	mode := flag.String("mode", "pair", "pair | create | join | lobby")
 	roomFlag := flag.String("room", "", "room code to join (-mode join)")
 	name := flag.String("name", "probe", "player name sent in HELLO (1..24 bytes)")
 	buildHex := flag.String("build", "5052-4f42-4500-0000", "build fingerprint, 8 bytes as hex (dashes ignored)")
@@ -55,6 +59,8 @@ func main() {
 	switch *mode {
 	case "pair":
 		ok = runPair(*server, build, *name, *n, *interval, *timeout)
+	case "lobby":
+		ok = runLobby(*server, build, *name, *timeout)
 	case "create", "join":
 		var code relay.RoomCode
 		if *mode == "join" {
@@ -182,7 +188,11 @@ func (c *client) hello(h relay.Hello, timeout time.Duration) error {
 			switch m := e.msg.(type) {
 			case relay.Welcome:
 				c.token, c.slot, c.room = m.Token, m.Slot, m.Room
-				c.logf("WELCOME slot=%d room=%s", m.Slot, m.Room)
+				if m.Room == (relay.RoomCode{}) {
+					c.logf("WELCOME slot=%d (lobby)", m.Slot)
+				} else {
+					c.logf("WELCOME slot=%d room=%s", m.Slot, m.Room)
+				}
 				return nil
 			case relay.Error:
 				return fmt.Errorf("ERROR %d %q", m.Code, m.Text)
@@ -227,8 +237,44 @@ func (c *client) handle(e event) relay.Message {
 		c.logf("ERROR %d %q", m.Code, m.Text)
 	case relay.Welcome:
 		c.logf("WELCOME slot=%d room=%s (repeat)", m.Slot, m.Room)
+	case relay.Rooms:
+		c.logf("ROOMS count=%d", len(m.Rooms))
+		for _, r := range m.Rooms {
+			c.logf("  room=%s name=%q mode=%d players=%d/%d phase=%d", r.Room, r.Name, r.Mode, r.Players, r.Max, r.Phase)
+		}
+	case relay.RoomState:
+		var players []string
+		for _, p := range m.Players {
+			players = append(players, fmt.Sprintf("%d:%q ready=%d fighter=%d voted=%d", p.Slot, p.Name, p.Ready, p.Fighter, p.Voted))
+		}
+		c.logf("ROOM %s you=%d host=%d phase=%d max=%d candidates=%v votes=%v ms_left=%d players=[%s]",
+			m.Room, m.You, m.Host, m.Phase, m.Settings.Max, m.Candidates, m.Votes, m.MsLeft, strings.Join(players, ", "))
+	case relay.Start:
+		c.logf("START seed=%#08x mode=%d rounds=%d venue=%d players=%v", m.Seed, m.Mode, m.Rounds, m.Venue, m.Players)
 	}
 	return e.msg
+}
+
+// request sends m (unless nil) every 500 ms until a message arrives for which
+// accept returns true, or until timeout. Every message is printed.
+func (c *client) request(m relay.Message, timeout time.Duration, accept func(relay.Message) bool) (relay.Message, bool) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if m != nil {
+			c.send(m)
+		}
+		retry := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(retry) {
+			e, ok := c.next(time.Until(retry))
+			if !ok {
+				break
+			}
+			if got := c.handle(e); accept(got) {
+				return got, true
+			}
+		}
+	}
+	return nil, false
 }
 
 func (c *client) rttSummary() string {
@@ -504,4 +550,153 @@ func runPair(server string, build relay.Build, name string, n int, interval, tim
 	}
 	fmt.Printf("PASS: relay at %s works (room %s)\n", server, a.room)
 	return true
+}
+
+// ---- lobby: two clients through the lobby extension ----
+
+func isRoom(m relay.Message) bool { _, ok := m.(relay.RoomState); return ok }
+
+func isStart(m relay.Message) bool { _, ok := m.(relay.Start); return ok }
+
+func runLobby(server string, build relay.Build, name string, timeout time.Duration) bool {
+	failures := 0
+	check := func(cond bool, format string, args ...any) bool {
+		status := "ok  "
+		if !cond {
+			status = "FAIL"
+			failures++
+		}
+		fmt.Printf("%s %s\n", status, fmt.Sprintf(format, args...))
+		return cond
+	}
+	finish := func(clients ...*client) bool {
+		for _, c := range clients {
+			c.send(relay.Bye{Token: c.token})
+		}
+		if failures > 0 {
+			fmt.Printf("FAIL: %d check(s) failed against %s (lobby)\n", failures, server)
+			return false
+		}
+		fmt.Printf("PASS: lobby at %s works\n", server)
+		return true
+	}
+
+	a, err := dial(server, "A")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "relayprobe:", err)
+		return false
+	}
+	defer a.conn.Close()
+	b, err := dial(server, "B")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "relayprobe:", err)
+		return false
+	}
+	defer b.conn.Close()
+
+	// 1. Both enter the lobby. A relay without the extension drops HELLO mode 2.
+	for _, c := range []*client{a, b} {
+		if err := c.hello(relay.Hello{Mode: relay.ModeLobby, Build: build, Name: name + "-" + c.label}, timeout); err != nil {
+			check(false, "%s lobby HELLO: %v (a relay without the lobby extension drops HELLO mode 2)", c.label, err)
+			return finish()
+		}
+		check(c.slot == relay.SlotNone && c.room == relay.RoomCode{}, "%s in lobby: slot=%#x", c.label, c.slot)
+	}
+
+	// 2. A creates a public room with a recognisable name.
+	roomName := fmt.Sprintf("probe %04x", time.Now().UnixNano()&0xFFFF)
+	settings := relay.RoomSettings{Name: roomName, Public: 1, Mode: 0, Max: 2, Rounds: 0, Pool: []uint8{1, 6, 19}}
+	m, ok := a.request(relay.Create{Token: a.token, Settings: settings}, timeout, isRoom)
+	if !check(ok, "A CREATE answered with ROOM") {
+		return finish(a, b)
+	}
+	room := m.(relay.RoomState)
+	check(room.You == 0 && room.Host == 0 && room.Room.Valid(), "A is host of room %s", room.Room)
+
+	// 3. B finds it with LIST.
+	_, ok = b.request(relay.List{Token: b.token, Mode: relay.ModeAny}, timeout, func(m relay.Message) bool {
+		rs, isRooms := m.(relay.Rooms)
+		if !isRooms {
+			return false
+		}
+		for _, r := range rs.Rooms {
+			if r.Room == room.Room && r.Name == roomName {
+				return true
+			}
+		}
+		return false
+	})
+	if !check(ok, "B LIST shows room %s", room.Room) {
+		return finish(a, b)
+	}
+
+	// 4. B joins by code.
+	m, ok = b.request(relay.Join{Token: b.token, Room: room.Room}, timeout, func(m relay.Message) bool {
+		st, isRoom := m.(relay.RoomState)
+		return isRoom && len(st.Players) == 2
+	})
+	if !check(ok, "B JOIN answered with ROOM of 2") {
+		return finish(a, b)
+	}
+	check(m.(relay.RoomState).You == 1, "B is in slot 1")
+
+	// 5. Both ready; the vote starts.
+	inVote := func(m relay.Message) bool {
+		st, isRoom := m.(relay.RoomState)
+		return isRoom && st.Phase == relay.PhaseVoting
+	}
+	readyAck := func(m relay.Message) bool {
+		st, isRoom := m.(relay.RoomState)
+		if !isRoom {
+			return false
+		}
+		for _, p := range st.Players {
+			if p.Slot == st.You && p.Ready == 1 {
+				return true
+			}
+		}
+		return st.Phase == relay.PhaseVoting
+	}
+	_, okA := a.request(relay.Ready{Token: a.token, Ready: 1, Fighter: 1}, timeout, readyAck)
+	m, okB := b.request(relay.Ready{Token: b.token, Ready: 1, Fighter: 2}, timeout, readyAck)
+	check(okA && okB, "READY acknowledged on both")
+	if !okB || !inVote(m) {
+		m, okB = b.request(nil, timeout, inVote) // ROOM comes every second while voting
+	}
+	if !check(okB, "room entered voting") {
+		return finish(a, b)
+	}
+	vote := m.(relay.RoomState)
+	if !check(len(vote.Candidates) >= 1 && len(vote.Candidates) <= 3, "candidates %v", vote.Candidates) {
+		return finish(a, b)
+	}
+
+	// 6. Both vote for candidate 0; START reaches both. A VOTE after the vote
+	// ended is answered with the START again, so retrying is safe.
+	_, ok = a.request(relay.Vote{Token: a.token, Choice: 0}, timeout, func(m relay.Message) bool {
+		st, isRoom := m.(relay.RoomState)
+		return isStart(m) || (isRoom && len(st.Votes) > 0 && st.Votes[0] >= 1)
+	})
+	check(ok, "A VOTE acknowledged")
+	mb, okB := b.request(relay.Vote{Token: b.token, Choice: 0}, timeout, isStart)
+	ma, okA := a.request(relay.Vote{Token: a.token, Choice: 0}, timeout, isStart)
+	if !check(okA && okB, "START received on both") {
+		return finish(a, b)
+	}
+	sa, sb := ma.(relay.Start), mb.(relay.Start)
+	check(sa.Seed == sb.Seed && sa.Venue == sb.Venue && len(sa.Players) == 2,
+		"same START on both (seed %#08x venue %d)", sa.Seed, sa.Venue)
+	check(sa.Venue == vote.Candidates[0], "venue %d is the voted candidate %d", sa.Venue, vote.Candidates[0])
+
+	// 7. OVER from both returns the room to the lobby.
+	inLobby := func(m relay.Message) bool {
+		st, isRoom := m.(relay.RoomState)
+		return isRoom && st.Phase == relay.PhaseLobby
+	}
+	a.request(relay.Over{Token: a.token}, timeout, isRoom)
+	_, okB = b.request(relay.Over{Token: b.token}, timeout, inLobby)
+	_, okA = a.request(relay.Over{Token: a.token}, timeout, inLobby)
+	check(okA && okB, "OVER from both: back to phase 0")
+
+	return finish(a, b)
 }

@@ -191,3 +191,129 @@ func TestServerIntegration(t *testing.T) {
 		t.Errorf("log leaks names or addresses: %q", logs.lines)
 	}
 }
+
+// recvType waits for the next message of type ty, skipping others (ROOM
+// broadcasts interleave with everything in the lobby).
+func (c *udpClient) recvType(ty MsgType) Message {
+	c.t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if m := c.recv(); m.Type() == ty {
+			return m
+		}
+	}
+	c.t.Fatalf("no message of type %#x", ty)
+	return nil
+}
+
+func TestServerLobbyIntegration(t *testing.T) {
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &syncLog{}
+	srv, err := NewServer(ServerConfig{LogInterval: -1, Logf: logs.logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, conn) }()
+	addr := conn.LocalAddr().(*net.UDPAddr)
+
+	a := dialRelay(t, addr)
+	b := dialRelay(t, addr)
+
+	// Both enter the lobby.
+	a.send(Hello{Mode: ModeLobby, Build: build, Name: "Alice"})
+	wa, ok := a.recv().(Welcome)
+	if !ok || wa.Slot != SlotNone || wa.Room != (RoomCode{}) {
+		t.Fatalf("A welcome %#v", wa)
+	}
+	b.send(Hello{Mode: ModeLobby, Build: build, Name: "Bob"})
+	wb := b.recv().(Welcome)
+
+	// A creates a public room; B lists and finds it, then joins.
+	a.send(Create{Token: wa.Token, Settings: RoomSettings{Name: "Alice's", Public: 1, Mode: 0, Max: 4, Pool: []uint8{1, 6, 19}}})
+	ra := a.recvType(TypeRoom).(RoomState)
+	if ra.You != 0 || ra.Host != 0 || len(ra.Players) != 1 {
+		t.Fatalf("A ROOM %#v", ra)
+	}
+	b.send(List{Token: wb.Token, Mode: ModeAny})
+	rs := b.recvType(TypeRooms).(Rooms)
+	if len(rs.Rooms) != 1 || rs.Rooms[0].Room != ra.Room || rs.Rooms[0].Name != "Alice's" || rs.Rooms[0].Players != 1 {
+		t.Fatalf("ROOMS %#v", rs)
+	}
+	b.send(Join{Token: wb.Token, Room: ra.Room})
+	if rb := b.recvType(TypeRoom).(RoomState); rb.You != 1 || len(rb.Players) != 2 {
+		t.Fatalf("B ROOM %#v", rb)
+	}
+	if ra = a.recvType(TypeRoom).(RoomState); len(ra.Players) != 2 {
+		t.Fatalf("A ROOM after join %#v", ra)
+	}
+
+	// Ready, vote, START.
+	a.send(Ready{Token: wa.Token, Ready: 1, Fighter: 4})
+	b.send(Ready{Token: wb.Token, Ready: 1, Fighter: 5})
+	for {
+		if st := a.recvType(TypeRoom).(RoomState); st.Phase == PhaseVoting {
+			if len(st.Candidates) != 3 || st.MsLeft == 0 {
+				t.Fatalf("voting ROOM %#v", st)
+			}
+			break
+		}
+	}
+	a.send(Vote{Token: wa.Token, Choice: 2})
+	b.send(Vote{Token: wb.Token, Choice: 2})
+	sa := a.recvType(TypeStart).(Start)
+	sb := b.recvType(TypeStart).(Start)
+	if !msgEqual(sa, sb) || len(sa.Players) != 2 || sa.Players[0] != (StartPlayer{0, 4}) || sa.Players[1] != (StartPlayer{1, 5}) {
+		t.Fatalf("START %#v / %#v", sa, sb)
+	}
+
+	// DATA, then OVER from both returns the room to the lobby.
+	a.send(ClientData{Token: wa.Token, Payload: []byte("frame")})
+	if m := b.recvType(TypeData); !msgEqual(m, ServerData{From: 0, Payload: []byte("frame")}) {
+		t.Fatalf("B got %#v", m)
+	}
+	a.send(Over{Token: wa.Token})
+	b.send(Over{Token: wb.Token})
+	for {
+		if st := b.recvType(TypeRoom).(RoomState); st.Phase == PhaseLobby {
+			break
+		}
+	}
+
+	// B leaves (back to the lobby), then both say BYE.
+	b.send(Leave{Token: wb.Token})
+	for {
+		if st := a.recvType(TypeRoom).(RoomState); len(st.Players) == 1 {
+			break
+		}
+	}
+	b.send(Bye{Token: wb.Token})
+	a.send(Bye{Token: wa.Token})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if rooms, clients := srv.Snapshot(); rooms == 0 && clients == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rooms, clients := srv.Snapshot(); rooms != 0 || clients != 0 {
+		t.Errorf("rooms=%d clients=%d at the end", rooms, clients)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	for _, want := range []string{"lobby entered", "created", "joined", "voting", "started", "back to lobby", "closed (empty)"} {
+		if !logs.has(want) {
+			t.Errorf("no %q log line in %q", want, logs.lines)
+		}
+	}
+	if logs.has("Alice") || logs.has("127.0.0.1") {
+		t.Errorf("log leaks names or addresses: %q", logs.lines)
+	}
+}

@@ -1,6 +1,7 @@
 // Command relay is the Def Jam: Fight for NY netplay relay server
-// (protocol version 1, docs/netplay-protocol.md). It pairs two players into a
-// room and forwards their opaque packets. It keeps no state on disk.
+// (protocol version 1 with the lobby extension, docs/netplay-protocol.md). It
+// puts two to four players into a room and forwards their opaque packets. It
+// keeps no state on disk.
 //
 //	relay -listen :27777 -max-rooms 512 -max-clients 1024 -log-interval 60s
 package main
