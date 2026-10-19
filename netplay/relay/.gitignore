@@ -1,0 +1,7 @@
+# Build output
+dist/
+/relay
+/relayprobe
+*.exe
+*.test
+*.out
