@@ -105,8 +105,9 @@ class FfnyBot(discord.Client):
     async def build_server(self, guild):
         team = self.role(guild, core.TEAM_ROLE) or await guild.create_role(
             name=core.TEAM_ROLE, colour=ORANGE, hoist=True, mentionable=True, reason="FFNY bot layout")
-        if not self.role(guild, core.ALERT_ROLE):
-            await guild.create_role(name=core.ALERT_ROLE, mentionable=True, reason="FFNY bot layout")
+        for name in (core.ALERT_ROLE, core.MATCH_ROLE):
+            if not self.role(guild, name):
+                await guild.create_role(name=name, mentionable=True, reason="FFNY bot layout")
         everyone, me = guild.default_role, guild.me
         bot_all = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True,
                                               manage_messages=True, embed_links=True, attach_files=True,
@@ -125,7 +126,81 @@ class FfnyBot(discord.Client):
             for name, kind in channels:
                 await self.ensure_channel(guild, category, name, kind, team, bot_all)
         save_state(self.state)
+        await self.invite(guild)
         await self.post_texts(guild)
+        await self.community(guild)
+
+    async def invite(self, guild):
+        """The server's permanent invite (on #welcome), made once and kept in the state."""
+        code = self.state.get("invite")
+        if code:
+            try:
+                await self.fetch_invite(code)
+                return code
+            except discord.NotFound:
+                pass
+        channel = self.text_channel(guild, "welcome")
+        if channel is None:
+            return None
+        inv = await channel.create_invite(max_age=0, max_uses=0, unique=False, reason="permanent invite")
+        self.state["invite"] = inv.code
+        save_state(self.state)
+        log.info("permanent invite: %s", inv.url)
+        return inv.code
+
+    async def community(self, guild):
+        """Community mode, the welcome screen and the onboarding questions. Each step logs and
+        goes on when Discord refuses it, so the rest of the setup still runs."""
+        rules, team_chat = self.text_channel(guild, "rules"), self.text_channel(guild, "team-chat")
+        if "COMMUNITY" not in guild.features and rules and team_chat:
+            try:
+                await guild.edit(community=True, rules_channel=rules, public_updates_channel=team_chat,
+                                 verification_level=discord.VerificationLevel.low,
+                                 explicit_content_filter=discord.ContentFilter.all_members,
+                                 default_notifications=discord.NotificationLevel.only_mentions,
+                                 reason="FFNY community setup")
+                log.info("community mode on")
+            except discord.HTTPException as e:
+                log.warning("community mode: %s", e)
+                return
+        try:
+            channels = [discord.WelcomeChannel(channel=c, description=d, emoji=e)
+                        for name, e, d in core.WELCOME_CHANNELS if (c := self.text_channel(guild, name))]
+            await guild.edit_welcome_screen(description=core.WELCOME_SCREEN, welcome_channels=channels,
+                                            enabled=True, reason="FFNY welcome screen")
+        except discord.HTTPException as e:
+            log.warning("welcome screen: %s", e)
+        try:
+            await self.http.request(discord.http.Route("PUT", "/guilds/{guild_id}/onboarding", guild_id=guild.id),
+                                    json=self.onboarding(guild), reason="FFNY onboarding")
+            log.info("onboarding set")
+        except discord.HTTPException as e:
+            log.warning("onboarding: %s", e)
+
+    def snowflake(self, key):
+        """A stable id per onboarding question and answer, so a redeploy edits them in place."""
+        ids = self.state.setdefault("onboarding_ids", {})
+        if key not in ids:
+            ids[key] = str(discord.utils.time_snowflake(discord.utils.utcnow()) + len(ids))
+        return ids[key]
+
+    def onboarding(self, guild):
+        def channel_id(name):
+            c = discord.utils.get(guild.channels, name=name)
+            return str(c.id) if c else None
+        prompts = []
+        for pkey, title, options in core.ONBOARDING_PROMPTS:
+            opts = []
+            for okey, emoji, otitle, desc, roles, chans in options:
+                opts.append({"id": self.snowflake(pkey + "." + okey), "title": otitle, "description": desc,
+                             "emoji_name": emoji,
+                             "role_ids": [str(r.id) for n in roles if (r := self.role(guild, n))],
+                             "channel_ids": [i for n in chans if (i := channel_id(n))]})
+            prompts.append({"id": self.snowflake(pkey), "type": 0, "title": title, "options": opts,
+                            "single_select": False, "required": False, "in_onboarding": True})
+        save_state(self.state)
+        return {"prompts": prompts, "enabled": True, "mode": 0,
+                "default_channel_ids": [i for n in core.ONBOARDING_DEFAULTS if (i := channel_id(n))]}
 
     async def ensure_channel(self, guild, category, name, kind, team, bot_all):
         everyone, me = guild.default_role, guild.me
@@ -160,7 +235,7 @@ class FfnyBot(discord.Client):
     def text_channel(self, guild, name):
         return discord.utils.get(guild.text_channels, name=name)
 
-    async def put(self, guild, key, channel_name, content=None, embed=None, view=None):
+    async def put(self, guild, key, channel_name, content=None, embed=None, view=None, pin=False):
         """Posts a fixed message once and edits it to the current text on later starts."""
         channel = self.text_channel(guild, channel_name)
         if channel is None:
@@ -174,11 +249,17 @@ class FfnyBot(discord.Client):
             except discord.NotFound:
                 pass
         msg = await channel.send(content=content, embed=embed, view=view)
+        if pin:
+            await msg.pin(reason="FFNY bot")
         self.state["messages"][key] = msg.id
         save_state(self.state)
 
     async def post_texts(self, guild):
-        await self.put(guild, "welcome", "welcome", content=core.WELCOME)
+        welcome = core.WELCOME
+        if self.state.get("invite"):
+            welcome += "\n\n🔗 Bring your friends: https://discord.gg/" + self.state["invite"]
+        await self.put(guild, "welcome", "welcome", content=welcome)
+        await self.put(guild, "match", "find-a-match", content=core.MATCH_TEXT, pin=True)
         await self.put(guild, "rules", "rules", content=core.RULES)
         faq = discord.Embed(title="FAQ", colour=ORANGE)
         for q, a in core.FAQ:

@@ -15,6 +15,7 @@ UPDATE_URL = "http://play.defjam.online:27778/latest.json"
 
 TEAM_ROLE = "FFNY Team"
 ALERT_ROLE = "Build Alerts"
+MATCH_ROLE = "Match Ping"
 TICKET_CATEGORY = "🎫 TICKETS"
 TICKET_LOG = "ticket-log"
 ANNOUNCEMENTS = "announcements"
@@ -26,7 +27,7 @@ MAX_OPEN_TICKETS = 2
 LAYOUT = [
     ("📢 INFO", [("welcome", "read"), ("rules", "read"), ("announcements", "read"), ("status", "stat")]),
     ("💬 COMMUNITY", [("general", "chat"), ("find-a-match", "chat"), ("clips-and-screens", "chat"),
-                     ("ideas-and-feedback", "chat")]),
+                     ("ideas-and-feedback", "chat"), ("off-topic", "chat")]),
     ("🛠️ SUPPORT", [("get-help", "read"), ("faq", "read")]),
     ("🎮 VOICE", [("Lobby", "voice"), ("Match 1", "voice"), ("Match 2", "voice")]),
     (TICKET_CATEGORY, []),
@@ -123,6 +124,38 @@ Pick what fits. A short form opens, then you get a private channel with the FFNY
 Screenshots help a lot. Setup logs: `%LOCALAPPDATA%\\DefJamSetup\\logs`"""
 
 ALERTS_TEXT = "🔔 Want a ping when a new build is out? Use the button below (press again to stop)."
+
+MATCH_TEXT = f"""# Looking for a fight? ⚔️
+Post here and ping **@{MATCH_ROLE}**: everyone who opted in gets a ping.
+Tell them how to find you: **quick match**, your **room name**, or a **join code** from the ONLINE menu.
+Everyone in a match needs the same build. Want the pings yourself? Pick *Match calls* under Channels & Roles."""
+
+# Discord's onboarding for new members (needs a Community server). Default channels everyone
+# sees: Discord asks for at least seven, five of them ones @everyone can write in.
+ONBOARDING_DEFAULTS = ["welcome", "rules", "announcements", "get-help", "faq", "general", "find-a-match",
+                       "clips-and-screens", "ideas-and-feedback", "off-topic"]
+# Questions: (key, title, [(key, emoji, title, description, roles, channels)]).
+ONBOARDING_PROMPTS = [
+    ("pings", "What should we ping you for?", [
+        ("builds", "🔔", "New builds", "A ping when a new FFNY Online build is out", [ALERT_ROLE], []),
+        ("matches", "⚔️", "Match calls", "A ping when someone looks for a fight in #find-a-match",
+         [MATCH_ROLE], []),
+    ]),
+    ("voice", "Do you want the voice channels?", [
+        ("voice", "🎙️", "Yes, show them", "Lobby and match channels to talk while you fight", [],
+         ["Lobby", "Match 1", "Match 2"]),
+    ]),
+]
+
+WELCOME_SCREEN = "Def Jam: Fight for NY on PC with online multiplayer. Unofficial fan project."
+# Up to five channels on the welcome screen: (channel, emoji, description).
+WELCOME_CHANNELS = [
+    ("welcome", "👋", "Start here: download and disc guide"),
+    ("rules", "📜", "The few rules we have"),
+    ("find-a-match", "⚔️", "Find opponents"),
+    ("get-help", "🛠️", "Bug reports and setup help"),
+    ("announcements", "📢", "New builds and news"),
+]
 
 
 def slug(text, limit=20):

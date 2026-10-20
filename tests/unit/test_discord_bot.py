@@ -76,3 +76,23 @@ def test_transcript():
     text = core.transcript("bug-0001-a", [("2026-10-20 21:00", "a", "it crashed", ["https://x/y.png"])])
     assert text.startswith("Transcript of #bug-0001-a\n")
     assert "[2026-10-20 21:00] a: it crashed" in text and "attachment: https://x/y.png" in text
+
+
+def test_onboarding_meets_discords_rules():
+    kinds = {name: kind for _, channels in core.LAYOUT for name, kind in channels}
+    defaults = core.ONBOARDING_DEFAULTS
+    assert all(name in kinds for name in defaults)
+    assert len(defaults) >= 7
+    assert sum(kinds[n] == "chat" for n in defaults) >= 5      # ones @everyone can write in
+    roles = {core.TEAM_ROLE, core.ALERT_ROLE, core.MATCH_ROLE}
+    for key, title, options in core.ONBOARDING_PROMPTS:
+        assert len(title) <= 100 and 1 <= len(options) <= 50
+        for okey, emoji, otitle, desc, opt_roles, chans in options:
+            assert len(otitle) <= 50 and len(desc) <= 100
+            assert opt_roles or chans
+            assert set(opt_roles) <= roles
+            assert all(c in kinds and c not in defaults for c in chans)
+    assert len(core.WELCOME_CHANNELS) <= 5
+    for name, emoji, desc in core.WELCOME_CHANNELS:
+        assert name in kinds and len(desc) <= 42
+    assert len(core.WELCOME_SCREEN) <= 140 and len(core.MATCH_TEXT) <= 2000
