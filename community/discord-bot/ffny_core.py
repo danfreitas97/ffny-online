@@ -1,0 +1,177 @@
+"""FFNY Online Discord bot: everything that does not need Discord itself.
+
+The server layout, the texts the bot posts, the ticket forms and the small parsers for the
+update manifest and the relay's summary line. ffny_bot.py does the Discord side; keeping
+this part free of discord.py lets the unit tests check it on any machine.
+"""
+import json
+import re
+
+GITHUB = "https://github.com/sweeax-exe/ffny-online"
+DOWNLOAD = GITHUB + "/releases/latest"
+DISC_GUIDE = GITHUB + "/blob/main/docs/dump-your-disc.md"
+ISSUES = GITHUB + "/issues"
+UPDATE_URL = "http://play.defjam.online:27778/latest.json"
+
+TEAM_ROLE = "FFNY Team"
+ALERT_ROLE = "Build Alerts"
+TICKET_CATEGORY = "🎫 TICKETS"
+TICKET_LOG = "ticket-log"
+ANNOUNCEMENTS = "announcements"
+HELP_CHANNEL = "get-help"
+MAX_OPEN_TICKETS = 2
+
+# Channel kinds: read (everyone reads, only the team and the bot write), chat, team (team only),
+# voice, and stat (the player count in its name; nobody joins it).
+LAYOUT = [
+    ("📢 INFO", [("welcome", "read"), ("rules", "read"), ("announcements", "read"), ("status", "stat")]),
+    ("💬 COMMUNITY", [("general", "chat"), ("find-a-match", "chat"), ("clips-and-screens", "chat"),
+                     ("ideas-and-feedback", "chat")]),
+    ("🛠️ SUPPORT", [("get-help", "read"), ("faq", "read")]),
+    ("🎮 VOICE", [("Lobby", "voice"), ("Match 1", "voice"), ("Match 2", "voice")]),
+    (TICKET_CATEGORY, []),
+    ("🔒 TEAM", [("team-chat", "team"), (TICKET_LOG, "team")]),
+]
+
+# The ticket forms. A Discord form holds at most five fields; a label is at most 45 characters
+# and a placeholder at most 100. Fields: (key, label, style, required, placeholder).
+TICKET_TYPES = {
+    "bug": {
+        "label": "Bug report", "emoji": "🐞", "prefix": "bug",
+        "fields": [
+            ("what", "What happened?", "paragraph", True,
+             "What did you do, what did you expect, what did you see?"),
+            ("steps", "How can we see it too?", "paragraph", False,
+             "Steps, which screen, how often it happens"),
+            ("build", "Build number", "short", True, "The launcher shows it, e.g. 11"),
+            ("pc", "PC and controller", "short", False, "e.g. Windows 11, Xbox controller"),
+        ],
+    },
+    "setup": {
+        "label": "Setup & install", "emoji": "💿", "prefix": "setup",
+        "fields": [
+            ("step", "Where does the setup stop?", "paragraph", True,
+             "The step and the exact message it shows"),
+            ("dump", "Your dump", "short", False, "Disc image (.iso) or extracted folder"),
+            ("build", "Setup build", "short", False, "In the file name, e.g. remaster.11"),
+        ],
+    },
+    "online": {
+        "label": "Online & connection", "emoji": "🌐", "prefix": "online",
+        "fields": [
+            ("what", "What happens?", "paragraph", True,
+             "Cannot connect, the match does not start, lag, someone drops ..."),
+            ("where", "Quick match, room or code?", "short", False, "And how many players"),
+            ("build", "Build number", "short", True, "The launcher shows it, e.g. 11"),
+        ],
+    },
+    "other": {
+        "label": "Something else", "emoji": "💬", "prefix": "other",
+        "fields": [
+            ("subject", "Subject", "short", True, ""),
+            ("message", "Your message", "paragraph", True, ""),
+        ],
+    },
+}
+
+WELCOME = f"""# Welcome to FFNY Online 👊
+**Def Jam: Fight for NY** on PC, with online multiplayer: quick match, rooms, your own fighter and a venue vote, right in the game's main menu.
+
+FFNY Online is an unofficial fan project, based on Vlad Yanhursky's native PC port of the Xbox version. You need Windows and **your own USA Xbox disc**: the setup builds the game from it. No game files are shared here or anywhere in the project.
+
+**Get started**
+📥 Download: {DOWNLOAD}
+💿 Dump your disc: {DISC_GUIDE}
+🛠️ Problems? Open a ticket in #get-help
+🎮 Looking for opponents? #find-a-match
+
+Read #rules, then come and fight."""
+
+RULES = """# Rules
+**1. Respect.** No harassment, hate, slurs or threats. Trash talk stays about the fight.
+**2. No piracy.** No game files, ISOs, ROM links or "where can I get it". Everyone uses their own disc. This keeps the project alive.
+**3. No cheating** or tampering with other players' matches.
+**4. Stay on topic** per channel; no spam, no ads, no DM spam.
+**5. English** in the public channels, so everyone can follow.
+**6. Bugs go into tickets** (#get-help) so nothing gets lost.
+
+Breaking the rules can get you muted or removed. The FFNY Team decides."""
+
+FAQ = [
+    ("Which version of the game do I need?",
+     "The original **Xbox** version, **USA (NTSC-U)**. PS2, GameCube and PAL discs do not work."),
+    ("How do I get the game files from my disc?",
+     f"A normal PC drive cannot read Xbox discs. The guide explains the usual ways: {DISC_GUIDE}"),
+    ("Windows says the setup is not safe.",
+     "The setup is not signed. Choose **More info** and **Run anyway**. It only builds the game from your own dump."),
+    ("How do I play online?",
+     "Start the game and choose **ONLINE** in the main menu: quick match, rooms, or join a friend by code. No port forwarding needed."),
+    ("How do I update?",
+     "The launcher offers new builds by itself at its next start. Everyone in a match needs the same build."),
+    ("Something does not work.",
+     "Open a ticket in #get-help. Screenshots help, and the setup's logs are in `%LOCALAPPDATA%\\DefJamSetup\\logs`."),
+]
+
+HELP_PANEL = """# Need help? Open a ticket
+Pick what fits. A short form opens, then you get a private channel with the FFNY Team.
+
+🐞 **Bug report**: something in the game is wrong
+💿 **Setup & install**: the setup stops or the game does not start
+🌐 **Online & connection**: connecting, matches, lag
+💬 **Something else**
+
+Screenshots help a lot. Setup logs: `%LOCALAPPDATA%\\DefJamSetup\\logs`"""
+
+ALERTS_TEXT = "🔔 Want a ping when a new build is out? Use the button below (press again to stop)."
+
+
+def slug(text, limit=20):
+    """A channel-name-safe piece of a user name: lower case, letters, digits and dashes."""
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return (s[:limit].strip("-")) or "player"
+
+
+def ticket_channel_name(prefix, number, username):
+    return "%s-%04d-%s" % (prefix, number, slug(username))
+
+
+def parse_relay_summary(text):
+    """(rooms, clients) from the newest relay summary line, or None."""
+    found = None
+    for m in re.finditer(r"summary rooms=(\d+) clients=(\d+)", text):
+        found = (int(m.group(1)), int(m.group(2)))
+    return found
+
+
+def status_name(summary):
+    """The status channel's name for a parse_relay_summary() result."""
+    if summary is None:
+        return "🔴 Server offline"
+    rooms, clients = summary
+    return "🟢 %d online · %d room%s" % (clients, rooms, "" if rooms == 1 else "s")
+
+
+def parse_manifest(raw):
+    """The update manifest's build, version and notes, or None when it is not one."""
+    try:
+        m = json.loads(raw)
+        build = int(m["build"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return {"build": build, "version": str(m.get("version", "")), "notes": str(m.get("notes", ""))}
+
+
+def is_new_build(last_build, manifest):
+    """True when manifest announces a build after last_build. The first look (no last_build)
+    only records the build: the bot should not announce what was already out."""
+    return manifest is not None and last_build is not None and manifest["build"] > last_build
+
+
+def transcript(channel_name, lines):
+    """A ticket's transcript as text; lines are (time, author, content, attachment urls)."""
+    out = ["Transcript of #%s" % channel_name, ""]
+    for when, author, content, files in lines:
+        out.append("[%s] %s: %s" % (when, author, content))
+        for url in files:
+            out.append("    attachment: %s" % url)
+    return "\n".join(out) + "\n"

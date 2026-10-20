@@ -1,0 +1,24 @@
+[Unit]
+Description=FFNY Online Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ffny-bot
+Group=ffny-bot
+# reads the relay's summary lines for the status channel
+SupplementaryGroups=systemd-journal
+Environment=FFNY_BOT_TOKEN_FILE=/etc/ffny-bot/token
+Environment=FFNY_BOT_STATE=/var/lib/ffny-bot/state.json
+ExecStart=/opt/ffny-bot/venv/bin/python /opt/ffny-bot/ffny_bot.py
+Restart=on-failure
+RestartSec=15
+StateDirectory=ffny-bot
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/ffny-bot
+
+[Install]
+WantedBy=multi-user.target
