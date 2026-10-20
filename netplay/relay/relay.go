@@ -93,6 +93,8 @@ type Stats struct {
 	// while alone in the room or in the lobby, BYE or LEAVE that nobody had
 	// to be told about.
 	Dropped uint64
+	// Moved counts clients that came back from a new address with their token.
+	Moved uint64
 }
 
 // client is one registered player.
@@ -160,6 +162,7 @@ type source struct {
 type Relay struct {
 	cfg     Config
 	clients map[netip.AddrPort]*client
+	byToken map[Token]*client // the same clients by token, for a client whose address changed
 	rooms   map[RoomCode]*room
 	sources map[netip.Addr]*source
 	salt    [16]byte // per-process salt for anonymised log ids
@@ -174,6 +177,7 @@ func NewRelay(cfg Config) (*Relay, error) {
 	r := &Relay{
 		cfg:     cfg,
 		clients: make(map[netip.AddrPort]*client),
+		byToken: make(map[Token]*client),
 		rooms:   make(map[RoomCode]*room),
 		sources: make(map[netip.Addr]*source),
 	}
@@ -368,13 +372,25 @@ func (r *Relay) newClient(now time.Time, from netip.AddrPort, h Hello, rm *room,
 	}
 	c.welcome = mustEncode(Welcome{Token: c.token, Slot: slot, Room: code})
 	r.clients[from] = c
+	r.byToken[c.token] = c
 	return c, nil
 }
 
-// auth finds the client that owns token at address from. A mismatch is
-// answered with ERROR 7 at most once per second per source.
+// auth finds the client that owns token at address from. A known token from a
+// new address moves the client there (a home router that changed its port, a
+// laptop that changed networks): the token is the client's secret, so the
+// session, its room and a running match go on. Any other mismatch is answered
+// with ERROR 7 at most once per second per source.
 func (r *Relay) auth(now time.Time, from netip.AddrPort, src *source, tok Token, reqLen int) (*client, []Packet) {
 	if c := r.clients[from]; c != nil && subtle.ConstantTimeCompare(c.token[:], tok[:]) == 1 {
+		return c, nil
+	}
+	if c := r.byToken[tok]; c != nil && r.clients[from] == nil {
+		delete(r.clients, c.addr)
+		r.cfg.Logf("client c=%s moved to a new address", c.id)
+		c.addr = from
+		r.clients[from] = c
+		r.stats.Moved++
 		return c, nil
 	}
 	if now.Sub(src.lastErr7) < time.Second {
@@ -387,6 +403,7 @@ func (r *Relay) auth(now time.Time, from netip.AddrPort, src *source, tok Token,
 // removeClient unregisters c, taking it out of its room first (see leaveRoom).
 func (r *Relay) removeClient(now time.Time, c *client, reason string) []Packet {
 	delete(r.clients, c.addr)
+	delete(r.byToken, c.token)
 	if c.room == nil {
 		r.cfg.Logf("lobby left by c=%s reason=%s", c.id, reason)
 		return nil
@@ -414,6 +431,7 @@ func (r *Relay) Tick(now time.Time) []Packet {
 		for i, c := range rm.slots {
 			if c != nil {
 				delete(r.clients, c.addr)
+				delete(r.byToken, c.token)
 				rm.slots[i] = nil
 			}
 		}

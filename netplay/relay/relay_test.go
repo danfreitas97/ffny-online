@@ -424,11 +424,7 @@ func TestTokenCheck(t *testing.T) {
 		t.Fatal("bad BYE removed a client")
 	}
 
-	// The right token from a different address (port) is also unknown.
-	h.now = h.now.Add(time.Second)
-	moved := ap("198.51.100.1:40002")
-	expectError(t, h.send(moved, ClientData{Token: wh.Token, Payload: []byte("hi")}), moved, ErrUnknownToken)
-	// Another client's token from my address is unknown too.
+	// Another client's token from my address is unknown.
 	h.now = h.now.Add(time.Second)
 	expectError(t, h.send(hostAddr, Ping{Token: wg.Token, Nonce: 2}), hostAddr, ErrUnknownToken)
 
@@ -447,6 +443,34 @@ func TestTokenCheck(t *testing.T) {
 
 	// The real token still works.
 	expectOne(t, h.send(hostAddr, Ping{Token: wh.Token, Nonce: 3}), hostAddr, Pong{Nonce: 3})
+}
+
+// A client whose address changes (a router's new port, another network) keeps its
+// session: its token moves it, its room and the forwarding follow, the old address
+// is forgotten, and a token can never take over an address another client holds.
+func TestClientMovesAddress(t *testing.T) {
+	h := newHarness(t, Config{})
+	wh, wg := h.pair(hostAddr, guestAddr)
+	moved := ap("198.51.100.1:40002")
+	expectOne(t, h.send(moved, ClientData{Token: wh.Token, Payload: []byte("hi")}), guestAddr,
+		ServerData{From: 0, Payload: []byte("hi")})
+	expectOne(t, h.send(guestAddr, ClientData{Token: wg.Token, Payload: []byte("yo")}), moved,
+		ServerData{From: 1, Payload: []byte("yo")})
+	expectOne(t, h.send(moved, Ping{Token: wh.Token, Nonce: 9}), moved, Pong{Nonce: 9})
+	if h.r.Clients() != 2 || h.r.stats.Moved != 1 {
+		t.Fatalf("clients %d, moved %d", h.r.Clients(), h.r.stats.Moved)
+	}
+	// The guest's token from the host's (now registered) new address is refused.
+	h.now = h.now.Add(time.Second)
+	expectError(t, h.send(moved, Ping{Token: wg.Token, Nonce: 1}), moved, ErrUnknownToken)
+	// BYE from the new address removes the client.
+	h.send(moved, Bye{Token: wh.Token})
+	if h.r.Clients() != 1 {
+		t.Fatalf("clients after BYE %d", h.r.Clients())
+	}
+	// A removed client's token moves nothing.
+	h.now = h.now.Add(time.Second)
+	expectError(t, h.send(thirdAddr, Ping{Token: wh.Token, Nonce: 2}), thirdAddr, ErrUnknownToken)
 }
 
 func TestIdleTimeout(t *testing.T) {
