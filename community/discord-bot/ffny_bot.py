@@ -76,13 +76,21 @@ class FfnyBot(discord.Client):
 
     async def on_ready(self):
         log.info("logged in as %s in %d server(s)", self.user, len(self.guilds))
+        guild = self.guild()
+        if guild is None:
+            log.warning("not in a server yet: waiting for the invite")
+            return
+        await self.start_in(guild)
+
+    async def on_guild_join(self, guild):
+        log.info("joined %s", guild.name)
+        if guild == self.guild():
+            await self.start_in(guild)
+
+    async def start_in(self, guild):
         if self.ready_once:
             return
         self.ready_once = True
-        guild = self.guild()
-        if guild is None:
-            log.warning("not in a server yet: invite the bot, then restart it")
-            return
         await self.build_server(guild)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
