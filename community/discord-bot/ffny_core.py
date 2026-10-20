@@ -12,6 +12,7 @@ DOWNLOAD = GITHUB + "/releases/latest"
 DISC_GUIDE = GITHUB + "/blob/main/docs/dump-your-disc.md"
 ISSUES = GITHUB + "/issues"
 UPDATE_URL = "http://play.defjam.online:27778/latest.json"
+ACCOUNTS_URL = "http://127.0.0.1:8091"      # the account service's local listener for the bot
 
 TEAM_ROLE = "FFNY Team"
 ALERT_ROLE = "Build Alerts"
@@ -21,6 +22,7 @@ TICKET_LOG = "ticket-log"
 ANNOUNCEMENTS = "announcements"
 HELP_CHANNEL = "get-help"
 MAX_OPEN_TICKETS = 2
+LEADERBOARD_MIN = 3        # the account service's LeaderboardMin
 
 # Channel kinds: read (everyone reads, only the team and the bot write), chat, team (team only),
 # voice, and stat (the player count in its name; nobody joins it).
@@ -208,3 +210,34 @@ def transcript(channel_name, lines):
         for url in files:
             out.append("    attachment: %s" % url)
     return "\n".join(out) + "\n"
+
+
+RESULT_MARK = {"win": "🟢 W", "loss": "🔴 L", "draw": "⚪ D"}
+
+
+def record_line(stats):
+    """'12 W · 5 L · 1 D · 71%' for an account's statistics."""
+    line = "%d W · %d L" % (stats.get("wins", 0), stats.get("losses", 0))
+    if stats.get("draws"):
+        line += " · %d D" % stats["draws"]
+    if stats.get("wins", 0) + stats.get("losses", 0):
+        line += " · %d%%" % stats.get("win_rate", 0)
+    return line
+
+
+def recent_lines(stats, n=5):
+    """The last matches, one line each: result, fighter, opponents, venue."""
+    out = []
+    for m in (stats.get("recent") or [])[:n]:
+        opp = ", ".join(m.get("opponents") or []) or "?"
+        line = "%s  %s vs %s" % (RESULT_MARK.get(m.get("result"), "?"), m.get("fighter") or "?", opp)
+        if m.get("venue"):
+            line += "  · " + m["venue"]
+        out.append(line)
+    return out
+
+
+def leaderboard_lines(entries):
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    return ["%s **%s**  %d W · %d L · %d%%" % (medals.get(e["rank"], "`%2d.`" % e["rank"]), e["name"], e["wins"],
+                                               e["losses"], e["win_rate"]) for e in entries]

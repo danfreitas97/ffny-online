@@ -96,3 +96,15 @@ def test_onboarding_meets_discords_rules():
     for name, emoji, desc in core.WELCOME_CHANNELS:
         assert name in kinds and len(desc) <= 42
     assert len(core.WELCOME_SCREEN) <= 140 and len(core.MATCH_TEXT) <= 2000
+
+
+def test_profile_and_leaderboard_lines():
+    st = {"wins": 12, "losses": 5, "draws": 1, "win_rate": 71,
+          "recent": [{"result": "win", "fighter": "A", "opponents": ["DMX"], "venue": "Club"},
+                     {"result": "loss", "fighter": "A", "opponents": [], "venue": ""}]}
+    assert core.record_line(st) == "12 W · 5 L · 1 D · 71%"
+    assert core.record_line({"wins": 0, "losses": 0}) == "0 W · 0 L"
+    assert core.recent_lines(st) == ["🟢 W  A vs DMX  · Club", "🔴 L  A vs ?"]
+    lines = core.leaderboard_lines([{"rank": 1, "name": "Masa", "wins": 3, "losses": 0, "win_rate": 100},
+                                    {"rank": 4, "name": "X", "wins": 1, "losses": 2, "win_rate": 33}])
+    assert lines[0].startswith("🥇 **Masa**") and lines[1].startswith("` 4.` **X**")

@@ -1,6 +1,6 @@
 // Command accounts is FFNY Online's account service: sign-in with Discord for the launcher.
 // It listens on a local port behind the HTTPS proxy (deploy/Caddyfile) and keeps its data in
-// one JSON file.
+// one JSON file. A second local listener (-internal-listen) serves the Discord bot.
 //
 //	accounts -listen 127.0.0.1:8090 -data /var/lib/ffny-accounts/accounts.json \
 //	         -public-url https://play.defjam.online -client-id ID -client-secret-file FILE
@@ -27,6 +27,7 @@ func main() {
 	publicURL := flag.String("public-url", "https://play.defjam.online", "the address players reach the service at")
 	clientID := flag.String("client-id", "", "the Discord application's client id")
 	secretFile := flag.String("client-secret-file", "", "file holding the Discord client secret")
+	internal := flag.String("internal-listen", "127.0.0.1:8091", "local address for the Discord bot (empty: off)")
 	flag.Parse()
 
 	secret, err := os.ReadFile(*secretFile)
@@ -52,6 +53,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				srv.Settle()
 				if err := store.Save(); err != nil {
 					log.Printf("accounts: save: %v", err)
 				}
@@ -64,6 +66,15 @@ func main() {
 		defer cancel()
 		httpSrv.Shutdown(shut)
 	}()
+	if *internal != "" {
+		in := &http.Server{Addr: *internal, Handler: srv.Internal(), ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			if err := in.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("accounts: internal listener: %v", err)
+			}
+		}()
+		go func() { <-ctx.Done(); in.Close() }()
+	}
 	log.Printf("accounts: %d accounts, listening on %s for %s", store.Count(), *listen, *publicURL)
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("accounts: %v", err)

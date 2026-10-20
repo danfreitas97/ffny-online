@@ -78,6 +78,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /auth/logout", s.logout)
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("DELETE /api/me", s.deleteMe)
+	mux.HandleFunc("POST /api/matches", s.report)
+	mux.HandleFunc("GET /api/me/stats", s.myStats)
+	mux.HandleFunc("GET /api/leaderboard", s.leaderboard)
 	mux.HandleFunc("GET /privacy", s.privacy)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	return mux
@@ -299,6 +302,64 @@ func (s *Server) deleteMe(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) report(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.store.Session(bearer(r), s.now())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not signed in"})
+		return
+	}
+	var rep MatchReport
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&rep); err != nil || !s.store.Report(a.ID, rep, s.now()) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "report not taken"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "counted once the other players' games agree"})
+}
+
+func (s *Server) myStats(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.store.Session(bearer(r), s.now())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not signed in"})
+		return
+	}
+	st, _ := s.store.StatsOf(a.ID)
+	if r.URL.Query().Get("format") == "text" { // for the game: no JSON parser in C
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		io.WriteString(w, StatsText(st, s.store.Leaderboard(10, false)))
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) leaderboard(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"entries": s.store.Leaderboard(10, false), "min_matches": LeaderboardMin})
+}
+
+// Internal is the bot's view, on its own local listener (never behind the public proxy).
+func (s *Server) Internal() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /internal/discord/{id}", func(w http.ResponseWriter, r *http.Request) {
+		st, ok := s.store.StatsOfDiscord(r.PathValue("id"))
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no account"})
+			return
+		}
+		writeJSON(w, http.StatusOK, st)
+	})
+	mux.HandleFunc("GET /internal/leaderboard", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"entries": s.store.Leaderboard(10, true), "min_matches": LeaderboardMin})
+	})
+	return mux
+}
+
+// Settle counts finished matches; the service calls it every few seconds.
+func (s *Server) Settle() {
+	if counted, dropped := s.store.Settle(s.now()); counted+dropped > 0 {
+		log.Printf("accounts: %d match(es) counted, %d dropped (reports disagreed)", counted, dropped)
+	}
+}
+
 func (s *Server) privacy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	io.WriteString(w, htmlHead("Privacy")+privacyText+"</main></body></html>")
@@ -334,7 +395,9 @@ const privacyText = `<h1>Privacy</h1>
 <h2>What is stored when you sign in with Discord</h2>
 <ul><li>your Discord user id, username, display name and avatar id, so the game can show who you are;</li>
 <li>when the account was made and last used;</li>
-<li>a session for each launcher you signed in with (stored only as a hash).</li></ul>
+<li>a session for each launcher you signed in with (stored only as a hash);</li>
+<li>the results of the online matches you play while signed in: wins, losses, the fighters you used, and your last 20 matches with the venue and your opponents' names.</li></ul>
+<p>Your statistics are shown to you in the game, and your name, wins and losses on the public leaderboard (in the game and on the project's Discord, where members can also look up your statistics with /profile).</p>
 <p>Nothing else is read from Discord (only the <em>identify</em> permission), and Discord's own login token is not kept.
 The data is stored on the project's server in Germany and is not shared or sold.</p>
 <h2>Deleting it</h2>

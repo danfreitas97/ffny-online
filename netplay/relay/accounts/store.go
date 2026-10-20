@@ -25,6 +25,7 @@ type Account struct {
 	Avatar    string    `json:"avatar,omitempty"`
 	Created   time.Time `json:"created"`
 	LastSeen  time.Time `json:"last_seen"`
+	Stats     *Stats    `json:"stats,omitempty"`
 }
 
 type session struct {
@@ -47,6 +48,7 @@ type Store struct {
 	accounts  map[int64]*Account
 	byDiscord map[string]int64
 	sessions  map[string]*session
+	pending   map[string]*pendingMatch // match reports waiting for the others (not saved)
 	dirty     bool
 }
 
@@ -91,6 +93,12 @@ func (s *Store) Save() error {
 	d := fileData{NextID: s.nextID, Sessions: map[string]*session{}}
 	for _, a := range s.accounts {
 		c := *a
+		if a.Stats != nil {
+			st := *a.Stats
+			st.Fighters, st.FNames = copyMap(a.Stats.Fighters), copyMap(a.Stats.FNames)
+			st.Recent = append([]MatchLine(nil), a.Stats.Recent...)
+			c.Stats = &st
+		}
 		d.Accounts = append(d.Accounts, &c)
 	}
 	for k, v := range s.sessions {
@@ -198,6 +206,17 @@ func (s *Store) Count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.accounts)
+}
+
+func copyMap[V any](m map[string]V) map[string]V {
+	if m == nil {
+		return nil
+	}
+	c := make(map[string]V, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
 }
 
 func randomHex(n int) string {

@@ -1,0 +1,151 @@
+package accounts
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func oneOnOne(key string, you int, winner int) MatchReport {
+	return MatchReport{Key: key, Mode: 0, ModeName: "One on One", Venue: 19, VenueName: "Club", You: you,
+		Players: []MatchPlayer{{Slot: 0, Name: "Masa", Fighter: 55, FName: "Fighter A"},
+			{Slot: 1, Name: "DMX", Fighter: 22, FName: "Fighter B"}},
+		Winners: []int{winner}}
+}
+
+func twoAccounts(t *testing.T) (*Store, Account, Account, time.Time) {
+	store, err := Open(filepath.Join(t.TempDir(), "a.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	return store, store.Upsert("1", "masa", "Masa", "", now), store.Upsert("2", "dmx", "DMX", "", now), now
+}
+
+func TestAgreeingReportsCount(t *testing.T) {
+	store, a, b, now := twoAccounts(t)
+	if !store.Report(a.ID, oneOnOne("ROOM-1-1", 0, 0), now) || !store.Report(b.ID, oneOnOne("ROOM-1-1", 1, 0), now) {
+		t.Fatal("reports refused")
+	}
+	if c, d := store.Settle(now.Add(ReportWindow / 2)); c+d != 0 {
+		t.Fatal("settled before the window ended")
+	}
+	if c, d := store.Settle(now.Add(ReportWindow)); c != 1 || d != 0 {
+		t.Fatalf("settle: %d counted, %d dropped", c, d)
+	}
+	sa, _ := store.StatsOf(a.ID)
+	sb, _ := store.StatsOf(b.ID)
+	if sa.Wins != 1 || sa.Losses != 0 || sa.Streak != 1 || sa.FavoriteName != "Fighter A" || sa.WinRate != 100 {
+		t.Fatalf("winner %+v", sa)
+	}
+	if sb.Wins != 0 || sb.Losses != 1 || sb.Recent[0].Result != "loss" || sb.Recent[0].Opponents[0] != "Masa" ||
+		sb.Recent[0].Fighter != "Fighter B" || sb.Recent[0].Venue != "Club" {
+		t.Fatalf("loser %+v", sb)
+	}
+}
+
+func TestDisagreeingReportsAreDropped(t *testing.T) {
+	store, a, b, now := twoAccounts(t)
+	store.Report(a.ID, oneOnOne("ROOM-1-2", 0, 0), now)
+	store.Report(b.ID, oneOnOne("ROOM-1-2", 1, 1), now) // both claim the win
+	if c, d := store.Settle(now.Add(ReportWindow)); c != 0 || d != 1 {
+		t.Fatalf("settle: %d counted, %d dropped", c, d)
+	}
+	if st, _ := store.StatsOf(a.ID); st.Matches != 0 {
+		t.Fatal("a disputed match counted")
+	}
+}
+
+func TestBadReportsAndFlooding(t *testing.T) {
+	store, a, _, now := twoAccounts(t)
+	bad := oneOnOne("ROOM-1-3", 3, 0) // reporter not in the match
+	if store.Report(a.ID, bad, now) {
+		t.Fatal("took a report from outside the match")
+	}
+	bad = oneOnOne("ROOM-1-3", 0, 2) // winner not in the match
+	if store.Report(a.ID, bad, now) {
+		t.Fatal("took an impossible winner")
+	}
+	n := 0
+	for i := 0; i < maxReportsPerHour+5; i++ {
+		if store.Report(a.ID, oneOnOne("FLOOD-"+string(rune('A'+i%26))+string(rune('a'+i/26)), 0, 0), now) {
+			n++
+		}
+	}
+	if n != maxReportsPerHour {
+		t.Fatalf("took %d reports in an hour", n)
+	}
+}
+
+func TestLeaderboardAndStatsRoutes(t *testing.T) {
+	s, store, h := newTestServer(t, discordUser{ID: "42", Username: "masa"})
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	a := store.Upsert("42", "masa", "Masa", "", now)
+	b := store.Upsert("43", "dmx", "DMX", "", now)
+	tokA := store.NewSession(a.ID, now)
+	for i := 0; i < LeaderboardMin; i++ {
+		key := "ROOM-2-" + string(rune('a'+i))
+		body, _ := json.Marshal(oneOnOne(key, 0, 0))
+		if r := do(h, "POST", "/api/matches", string(body), tokA); r.Code != http.StatusAccepted {
+			t.Fatalf("report: %d %s", r.Code, r.Body.String())
+		}
+		store.Report(b.ID, oneOnOne(key, 1, 0), now)
+	}
+	now = now.Add(ReportWindow)
+	s.Settle()
+	r := do(h, "GET", "/api/me/stats", "", tokA)
+	var st PublicStats
+	json.Unmarshal(r.Body.Bytes(), &st)
+	if r.Code != http.StatusOK || st.Wins != LeaderboardMin || st.Rank != 1 || st.BestStreak != LeaderboardMin {
+		t.Fatalf("my stats: %d %+v", r.Code, st)
+	}
+	r = do(h, "GET", "/api/leaderboard", "", "")
+	var lb struct {
+		Entries []LeaderboardEntry `json:"entries"`
+	}
+	json.Unmarshal(r.Body.Bytes(), &lb)
+	if len(lb.Entries) != 2 || lb.Entries[0].Name != "Masa" || lb.Entries[1].Name != "DMX" || lb.Entries[0].Discord != "" {
+		t.Fatalf("leaderboard %+v", lb.Entries)
+	}
+	if r := do(h, "POST", "/api/matches", "{}", ""); r.Code != http.StatusUnauthorized {
+		t.Fatalf("report without sign-in: %d", r.Code)
+	}
+	// the bot's listener names the Discord ids and finds a player by theirs
+	in := s.Internal()
+	rec := httptest.NewRecorder()
+	in.ServeHTTP(rec, httptest.NewRequest("GET", "/internal/discord/43", nil))
+	json.Unmarshal(rec.Body.Bytes(), &st)
+	if rec.Code != http.StatusOK || st.Losses != LeaderboardMin || st.Rank != 2 {
+		t.Fatalf("internal profile: %d %+v", rec.Code, st)
+	}
+	rec = httptest.NewRecorder()
+	in.ServeHTTP(rec, httptest.NewRequest("GET", "/internal/leaderboard", nil))
+	json.Unmarshal(rec.Body.Bytes(), &lb)
+	if lb.Entries[0].Discord != "42" {
+		t.Fatalf("internal leaderboard %+v", lb.Entries)
+	}
+	// statistics survive a restart
+	store.Save()
+	again, _ := Open(store.path)
+	if st, _ := again.StatsOf(a.ID); st.Wins != LeaderboardMin || len(st.Recent) != LeaderboardMin {
+		t.Fatalf("after reload %+v", st)
+	}
+}
+
+func TestStatsText(t *testing.T) {
+	st := PublicStats{Account: PublicAccount{Name: "Ma|sa"}, Matches: 2, Wins: 1, Losses: 1, WinRate: 50, Favorite: 55,
+		FavoriteName: "Fighter A", Rank: 3,
+		Recent: []MatchLine{{Result: "win", Fighter: "Fighter A", Opponents: []string{"DMX", "CPU"}, Venue: "Club"}}}
+	got := StatsText(st, []LeaderboardEntry{{Rank: 1, Name: "Top", Wins: 9, Losses: 2, WinRate: 82}})
+	for _, want := range []string{"name=Ma sa\n", "wins=1\n", "rank=3\n", "favorite=55\n", "favorite_name=Fighter A\n",
+		"recent=win|Fighter A|DMX, CPU|Club\n", "board=1|Top|9|2|82\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in\n%s", want, got)
+		}
+	}
+}

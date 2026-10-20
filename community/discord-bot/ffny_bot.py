@@ -471,6 +471,59 @@ async def status_cmd(interaction):
     await interaction.followup.send(embed=embed)
 
 
+async def accounts_get(path):
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+            async with s.get(core.ACCOUNTS_URL + path) as r:
+                return r.status, (await r.json() if r.content_type == "application/json" else None)
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return 0, None
+
+
+@bot.tree.command(name="profile", description="FFNY Online statistics of a player (yours by default)")
+@app_commands.describe(member="whose statistics")
+async def profile_cmd(interaction, member: discord.Member = None):
+    member = member or interaction.user
+    await interaction.response.defer(thinking=True)
+    status, st = await accounts_get("/internal/discord/%d" % member.id)
+    if status == 404:
+        who = "You have" if member == interaction.user else "%s has" % member.display_name
+        await interaction.followup.send("%s no FFNY Online account yet: sign in with Discord in the launcher "
+                                        "(Online page), then play online." % who)
+        return
+    if status != 200 or not st:
+        await interaction.followup.send("The account service does not answer right now; try again in a moment.")
+        return
+    embed = discord.Embed(title=st["account"]["name"], colour=ORANGE)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="Record", value=core.record_line(st) if st["matches"] else "no online matches yet")
+    embed.add_field(name="Leaderboard", value=("#%d" % st["rank"]) if st["rank"] else
+                    "after %d matches" % core.LEADERBOARD_MIN)
+    if st.get("best_streak"):
+        embed.add_field(name="Streak", value="%d now · best %d" % (st["streak"], st["best_streak"]))
+    if st.get("favorite_name"):
+        embed.add_field(name="Main", value=st["favorite_name"])
+    lines = core.recent_lines(st)
+    if lines:
+        embed.add_field(name="Last matches", value="\n".join(lines)[:1024], inline=False)
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="leaderboard", description="The FFNY Online leaderboard")
+async def leaderboard_cmd(interaction):
+    await interaction.response.defer(thinking=True)
+    status, lb = await accounts_get("/internal/leaderboard")
+    if status != 200 or lb is None:
+        await interaction.followup.send("The account service does not answer right now; try again in a moment.")
+        return
+    lines = core.leaderboard_lines(lb["entries"])
+    embed = discord.Embed(title="🏆 FFNY Online leaderboard", colour=ORANGE,
+                          description="\n".join(lines) if lines else
+                          "Nobody yet: play %d online matches signed in to get on it." % lb["min_matches"])
+    embed.set_footer(text="Most wins; signed-in players with %d+ online matches. Ranked play comes next." % lb["min_matches"])
+    await interaction.followup.send(embed=embed)
+
+
 @bot.tree.command(name="close", description="Close this ticket")
 async def close_cmd(interaction):
     await bot.close_ticket(interaction)
