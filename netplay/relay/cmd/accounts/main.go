@@ -1,0 +1,74 @@
+// Command accounts is FFNY Online's account service: sign-in with Discord for the launcher.
+// It listens on a local port behind the HTTPS proxy (deploy/Caddyfile) and keeps its data in
+// one JSON file.
+//
+//	accounts -listen 127.0.0.1:8090 -data /var/lib/ffny-accounts/accounts.json \
+//	         -public-url https://play.defjam.online -client-id ID -client-secret-file FILE
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"defjam/netplay/relay/accounts"
+)
+
+func main() {
+	listen := flag.String("listen", "127.0.0.1:8090", "HTTP address (the HTTPS proxy forwards to it)")
+	data := flag.String("data", "accounts.json", "the accounts file")
+	publicURL := flag.String("public-url", "https://play.defjam.online", "the address players reach the service at")
+	clientID := flag.String("client-id", "", "the Discord application's client id")
+	secretFile := flag.String("client-secret-file", "", "file holding the Discord client secret")
+	flag.Parse()
+
+	secret, err := os.ReadFile(*secretFile)
+	if err != nil || *clientID == "" {
+		log.Fatalf("accounts: need -client-id and a readable -client-secret-file (%v)", err)
+	}
+	store, err := accounts.Open(*data)
+	if err != nil {
+		log.Fatalf("accounts: %v", err)
+	}
+	srv := accounts.NewServer(accounts.Config{PublicURL: strings.TrimRight(*publicURL, "/"), ClientID: *clientID,
+		ClientSecret: strings.TrimSpace(string(secret))}, store)
+	httpSrv := &http.Server{Addr: *listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := store.Save(); err != nil {
+					log.Printf("accounts: save: %v", err)
+				}
+			}
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		httpSrv.Shutdown(shut)
+	}()
+	log.Printf("accounts: %d accounts, listening on %s for %s", store.Count(), *listen, *publicURL)
+	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("accounts: %v", err)
+	}
+	if err := store.Save(); err != nil {
+		log.Printf("accounts: save: %v", err)
+	}
+}

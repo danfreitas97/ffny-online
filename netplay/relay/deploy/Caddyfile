@@ -1,0 +1,18 @@
+# FFNY Online: HTTPS for play.defjam.online (managed by setup-accounts.sh)
+# Caddy gets and renews the certificate itself. The account service listens on localhost only.
+play.defjam.online {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+	@accounts path /auth/* /api/* /privacy /health
+	handle @accounts {
+		reverse_proxy 127.0.0.1:8090
+	}
+	handle {
+		redir https://github.com/sweeax-exe/ffny-online 302
+	}
+}
