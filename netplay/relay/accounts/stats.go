@@ -404,6 +404,9 @@ func StatsText(st PublicStats, board []LeaderboardEntry) string {
 	num("min", LeaderboardMin)
 	num("favorite", st.Favorite)
 	line("favorite_name", clean(st.FavoriteName))
+	if r := st.Ranked; r != nil {
+		line("ranked", fmt.Sprintf("%d|%d|%d|%d|%d", r.Rating, r.Games, r.Wins, r.Losses, r.Draws))
+	}
 	for _, m := range st.Recent {
 		opp := make([]string, len(m.Opponents))
 		for i, o := range m.Opponents {
