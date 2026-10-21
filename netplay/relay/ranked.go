@@ -107,13 +107,13 @@ func (r *Relay) ranked(now time.Time, c *client, m Ranked, reqLen int) []Packet 
 		return r.errorTo(c.addr, ErrRoomState, reqLen)
 	}
 	if q := c.queue; q != nil {
-		q.fighter = m.Fighter
+		q.fighter = safeFighter(m.Fighter)
 		if q.checked {
 			return []Packet{r.queueTo(now, c, QueueSearching)}
 		}
 		return []Packet{r.queueTo(now, c, QueueChecking)}
 	}
-	q := &queued{c: c, since: now, ticket: m.Ticket, fighter: m.Fighter}
+	q := &queued{c: c, since: now, ticket: m.Ticket, fighter: safeFighter(m.Fighter)}
 	c.queue = q
 	r.queue = append(r.queue, q)
 	r.lookups = append(r.lookups, RankedLookup{Token: c.token, Ticket: m.Ticket})

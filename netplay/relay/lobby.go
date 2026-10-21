@@ -347,11 +347,11 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 		if rm.phase != PhaseLobby {
 			return r.errorTo(c.addr, ErrNotAllowed, reqLen)
 		}
-		ready := m.Ready == 1
-		if c.ready == ready && c.fighter == m.Fighter {
+		ready, fighter := m.Ready == 1, safeFighter(m.Fighter)
+		if c.ready == ready && c.fighter == fighter {
 			return []Packet{r.roomTo(now, c)}
 		}
-		c.ready, c.fighter = ready, m.Fighter
+		c.ready, c.fighter = ready, fighter
 		return r.changed(now, rm)
 	case Vote:
 		return r.vote(now, c, m.Choice, reqLen)

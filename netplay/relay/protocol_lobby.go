@@ -78,6 +78,21 @@ const (
 	ErrRoomState  uint8 = 9 // not in a room, or already in one
 )
 
+// UnsafeFighters are fighter.xml IDs that crash the game when loaded into a Battle-mode match
+// (Teck, Santos, O.E, Eric Sermon: story figures without a select portrait). FFNY Online builds
+// 13 and 14 offered them; the relay plays SafeFighter instead, the same on every PC.
+var UnsafeFighters = map[uint8]bool{40: true, 41: true, 52: true, 78: true}
+
+// SafeFighter replaces an unsafe fighter.
+const SafeFighter uint8 = 55
+
+func safeFighter(f uint8) uint8 {
+	if UnsafeFighters[f] {
+		return SafeFighter
+	}
+	return f
+}
+
 // QuickPool is the venue pool of a room created by QUICK.
 var QuickPool = []uint8{1, 6, 19}
 

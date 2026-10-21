@@ -892,3 +892,19 @@ func TestLobbyWhoLimit(t *testing.T) {
 		t.Fatalf("PLAYERS is %d bytes", len(b))
 	}
 }
+
+func TestLobbyUnsafeFighterReplaced(t *testing.T) {
+	l := newLobby(t, Config{})
+	l.room4(1, pA, pB)
+	l.setReady(pA, 40) // Teck: crashes the game's match load
+	res := l.setReady(pB, 12)
+	st := roomOf(t, res, pA)
+	if st.Players[0].Fighter != SafeFighter || st.Players[1].Fighter != 12 {
+		t.Fatalf("fighters %+v", st.Players)
+	}
+	l.castVote(pA, 0)
+	start := startOf(t, l.castVote(pB, 0), pA)
+	if start.Players[0].Fighter != SafeFighter {
+		t.Fatalf("START %+v", start)
+	}
+}
