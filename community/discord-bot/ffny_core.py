@@ -137,6 +137,9 @@ FAQ = [
      "Start the game and choose **ONLINE** in the main menu: quick match, rooms, or join a friend by code. No port forwarding needed."),
     ("How do I update?",
      "The launcher offers new builds by itself at its next start. Everyone in a match needs the same build."),
+    ("White screen, white boxes or wrong pictures in the game?",
+     "That comes from the **HD textures**, which are still experimental. Turn them off in the launcher "
+     "(**Textures** page) and restart the game."),
     ("Something does not work.",
      "Open a ticket in #get-help. Screenshots help, and the setup's logs are in `%LOCALAPPDATA%\\DefJamSetup\\logs`."),
 ]

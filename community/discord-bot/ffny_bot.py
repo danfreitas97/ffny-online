@@ -329,6 +329,17 @@ class FfnyBot(discord.Client):
         if channel:
             await channel.send(text, file=file, allowed_mentions=discord.AllowedMentions.none())
 
+    async def member(self, guild, user_id):
+        """A member by id, asked of Discord when not in the cache (the bot has no members intent, so
+        only recently active members are cached); None when they left the server."""
+        found = guild.get_member(user_id)
+        if found:
+            return found
+        try:
+            return await guild.fetch_member(user_id)
+        except (discord.NotFound, discord.HTTPException):
+            return None
+
     def is_admin(self, member):
         perms = getattr(member, "guild_permissions", None)
         return bool(perms and (perms.administrator or perms.manage_guild))
@@ -356,7 +367,7 @@ class FfnyBot(discord.Client):
             lines.append((m.created_at.strftime("%Y-%m-%d %H:%M"), str(m.author), content,
                           [a.url for a in m.attachments]))
         text = core.transcript(channel.name, lines).encode("utf-8")
-        owner = interaction.guild.get_member(ticket["owner"])
+        owner = await self.member(interaction.guild, ticket["owner"])
         if not core.TICKET_TYPES.get(ticket["kind"], {}).get("private"):     # applications stay with the admins
             await self.ticket_log(interaction.guild, "📪 %s closed #%s (opened by <@%d>)" % (
                 interaction.user.mention, channel.name, ticket["owner"]),
@@ -470,7 +481,7 @@ class ApplicationControls(discord.ui.View):
         if ticket is None:
             await interaction.response.send_message("This application is already closed.", ephemeral=True)
             return
-        member = interaction.guild.get_member(ticket["owner"])
+        member = await bot.member(interaction.guild, ticket["owner"])
         if member is None:
             await interaction.response.send_message("The applicant has left the server.", ephemeral=True)
             return
