@@ -307,6 +307,8 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 	switch m := m.(type) {
 	case List:
 		return r.list(c, m)
+	case Who:
+		return r.who(c)
 	case Create:
 		return r.create(now, c, m.Settings, reqLen)
 	case Join:
@@ -398,6 +400,42 @@ func (r *Relay) list(c *client, m List) []Packet {
 			Room: rm.code, Name: rm.settings.Name, Mode: rm.settings.Mode,
 			Players: uint8(rm.count()), Max: rm.settings.Max, Phase: rm.phase,
 		})
+	}
+	return []Packet{{To: c.addr, Data: mustEncode(res)}}
+}
+
+// who answers WHO: how many are connected, the rooms, and the lobby players of the asker's
+// build (those in the hub first, then in rooms, then playing; by name), as many as fit.
+func (r *Relay) who(c *client) []Packet {
+	res := Players{Online: uint16(min(len(r.clients), 0xFFFF)), Rooms: uint16(min(len(r.rooms), 0xFFFF))}
+	var list []PlayerInfo
+	for _, o := range r.clients {
+		if !o.lobby || o.build != c.build || o.name == "" {
+			continue
+		}
+		state := PlayerLobby
+		if o.room != nil {
+			state = PlayerRoom
+			if o.room.phase == PhasePlaying {
+				state = PlayerPlaying
+			}
+		}
+		list = append(list, PlayerInfo{Name: o.name, State: state})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].State != list[j].State {
+			return list[i].State < list[j].State
+		}
+		return list[i].Name < list[j].Name
+	})
+	size := HeaderLen + 5
+	for _, p := range list {
+		entry := 1 + len(p.Name) + 1
+		if len(res.List) == MaxWho || size+entry > MaxDatagram {
+			break
+		}
+		size += entry
+		res.List = append(res.List, p)
 	}
 	return []Packet{{To: c.addr, Data: mustEncode(res)}}
 }

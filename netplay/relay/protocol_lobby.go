@@ -21,6 +21,14 @@ const (
 	MaxPool       = 32 // venues in Settings.pool
 	MaxCandidates = 3  // venues drawn from the pool for a vote
 	MaxListed     = 30 // rooms in one ROOMS reply
+	MaxWho        = 40 // players named in one PLAYERS reply
+)
+
+// PLAYERS per-player state.
+const (
+	PlayerLobby   uint8 = 0 // in the hub, in no room
+	PlayerRoom    uint8 = 1 // in a room that is not playing
+	PlayerPlaying uint8 = 2 // in a room that is playing
 )
 
 // Room phases.
@@ -44,6 +52,8 @@ const (
 	TypeRoom     MsgType = 0x19 // server -> client
 	TypeStart    MsgType = 0x1A // server -> client
 	TypeOver     MsgType = 0x1B // client -> server
+	TypeWho      MsgType = 0x1C // client -> server
+	TypePlayers  MsgType = 0x1D // server -> client
 )
 
 // Lobby ERROR codes.
@@ -213,6 +223,27 @@ type Start struct {
 	Players []StartPlayer
 }
 
+// Who asks who is online (the hub's player count and list).
+type Who struct {
+	Token Token
+}
+
+// PlayerInfo is one player in PLAYERS.
+type PlayerInfo struct {
+	Name  string
+	State uint8 // PlayerLobby, PlayerRoom or PlayerPlaying
+}
+
+// Players answers WHO: everyone connected, the rooms, and up to MaxWho players of the
+// asker's build who use the lobby, those in the hub first.
+type Players struct {
+	Online uint16
+	Rooms  uint16
+	List   []PlayerInfo
+}
+
+func (Who) Type() MsgType         { return TypeWho }
+func (Players) Type() MsgType     { return TypePlayers }
 func (List) Type() MsgType        { return TypeList }
 func (Create) Type() MsgType      { return TypeCreate }
 func (Join) Type() MsgType        { return TypeJoin }
@@ -241,6 +272,7 @@ func (m Ready) token() Token       { return m.Token }
 func (m Vote) token() Token        { return m.Token }
 func (m Leave) token() Token       { return m.Token }
 func (m Over) token() Token        { return m.Token }
+func (m Who) token() Token         { return m.Token }
 
 // More encoding errors.
 var (
@@ -278,6 +310,24 @@ func (m Vote) appendBody(b []byte) ([]byte, error) {
 
 func (m Leave) appendBody(b []byte) ([]byte, error) { return append(b, m.Token[:]...), nil }
 func (m Over) appendBody(b []byte) ([]byte, error)  { return append(b, m.Token[:]...), nil }
+func (m Who) appendBody(b []byte) ([]byte, error)   { return append(b, m.Token[:]...), nil }
+
+func (m Players) appendBody(b []byte) ([]byte, error) {
+	if len(m.List) > 255 {
+		return b, ErrListTooLong
+	}
+	b = binary.LittleEndian.AppendUint16(b, m.Online)
+	b = binary.LittleEndian.AppendUint16(b, m.Rooms)
+	b = append(b, byte(len(m.List)))
+	for _, p := range m.List {
+		var err error
+		if b, err = appendString(b, p.Name); err != nil {
+			return b, err
+		}
+		b = append(b, p.State)
+	}
+	return b, nil
+}
 
 func (m Rooms) appendBody(b []byte) ([]byte, error) {
 	if len(m.Rooms) > 255 {
@@ -448,6 +498,8 @@ func decodeLobbyClient(t MsgType, body []byte) (Message, error) {
 		m = Leave{Token: tok}
 	case TypeOver:
 		m = Over{Token: tok}
+	case TypeWho:
+		m = Who{Token: tok}
 	default:
 		return nil, ErrMalformed
 	}
@@ -462,6 +514,20 @@ func decodeLobbyServer(t MsgType, body []byte) (Message, error) {
 	c := newCursor(body)
 	var m Message
 	switch t {
+	case TypePlayers:
+		p := Players{Online: c.u16(), Rooms: c.u16()}
+		n := int(c.u8())
+		if n > MaxWho {
+			return nil, ErrMalformed
+		}
+		for i := 0; i < n && c.ok; i++ {
+			pi := PlayerInfo{Name: c.str(), State: c.u8()}
+			if pi.State > PlayerPlaying {
+				return nil, ErrMalformed
+			}
+			p.List = append(p.List, pi)
+		}
+		m = p
 	case TypeRooms:
 		n := int(c.u8())
 		if n > MaxListed {

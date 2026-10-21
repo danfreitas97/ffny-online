@@ -841,3 +841,53 @@ func TestLobbyLegacyInterop(t *testing.T) {
 		t.Fatalf("HELLO mode 1 into a lobby room %#v", res)
 	}
 }
+
+func (l *lobbyHarness) who(addr netip.AddrPort) Players {
+	l.t.Helper()
+	res := l.send(addr, Who{Token: l.tok[addr]})
+	if len(res) != 1 || res[0].to != addr {
+		l.t.Fatalf("WHO: %#v", res)
+	}
+	p, ok := res[0].msg.(Players)
+	if !ok {
+		l.t.Fatalf("WHO answered %#v", res[0].msg)
+	}
+	return p
+}
+
+func TestLobbyWho(t *testing.T) {
+	l := newLobby(t, Config{})
+	l.enter(pA, "zed")
+	l.enter(pB, "bob")
+	l.enter(pC, "carol")
+	l.room4(1, pB, pC)
+	p := l.who(pA)
+	if p.Online != 3 || p.Rooms != 1 || len(p.List) != 3 {
+		t.Fatalf("WHO: %+v", p)
+	}
+	// the hub first, then the rooms; by name within each
+	want := []PlayerInfo{{"zed", PlayerLobby}, {"bob", PlayerRoom}, {"carol", PlayerRoom}}
+	for i, w := range want {
+		if p.List[i] != w {
+			t.Fatalf("entry %d is %+v, want %+v", i, p.List[i], w)
+		}
+	}
+	if b := mustEncode(p); len(b) > MaxDatagram {
+		t.Fatalf("PLAYERS is %d bytes", len(b))
+	}
+}
+
+func TestLobbyWhoLimit(t *testing.T) {
+	l := newLobby(t, Config{})
+	for i := 0; i < 60; i++ {
+		a := netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, 8, 0, byte(i)}), 1)
+		l.enter(a, fmt.Sprintf("player number %02d long", i))
+	}
+	p := l.who(netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, 8, 0, 0}), 1))
+	if p.Online != 60 || len(p.List) != MaxWho {
+		t.Fatalf("WHO: online %d, %d listed", p.Online, len(p.List))
+	}
+	if b := mustEncode(p); len(b) > MaxDatagram {
+		t.Fatalf("PLAYERS is %d bytes", len(b))
+	}
+}

@@ -55,8 +55,8 @@ func (h *harness) sendRaw(from netip.AddrPort, b []byte) []got {
 		}
 		// Replies to the sender may never be larger than the request, except
 		// PEER and DATA, which only go to registered clients, and the lobby
-		// replies ROOMS, ROOM and START, which must go to a registered client.
-		lobbyReply := m.Type() == TypeRooms || m.Type() == TypeRoom || m.Type() == TypeStart
+		// replies ROOMS, ROOM, START and PLAYERS, which must go to a registered client.
+		lobbyReply := m.Type() == TypeRooms || m.Type() == TypeRoom || m.Type() == TypeStart || m.Type() == TypePlayers
 		if lobbyReply && h.r.clients[p.To] == nil {
 			h.t.Fatalf("%T sent to unregistered %v", m, p.To)
 		}

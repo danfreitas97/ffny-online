@@ -361,7 +361,7 @@ func DecodeClient(b []byte) (Message, error) {
 		var y Bye
 		copy(y.Token[:], body)
 		return y, nil
-	case TypeList, TypeCreate, TypeJoin, TypeQuick, TypeSettings, TypeReady, TypeVote, TypeLeave, TypeOver:
+	case TypeList, TypeCreate, TypeJoin, TypeQuick, TypeSettings, TypeReady, TypeVote, TypeLeave, TypeOver, TypeWho:
 		return decodeLobbyClient(t, body)
 	}
 	return nil, ErrMalformed
@@ -413,7 +413,7 @@ func DecodeServer(b []byte) (Message, error) {
 			return nil, ErrMalformed
 		}
 		return Error{Code: body[0], Text: text}, nil
-	case TypeRooms, TypeRoom, TypeStart:
+	case TypeRooms, TypeRoom, TypeStart, TypePlayers:
 		return decodeLobbyServer(t, body)
 	}
 	return nil, ErrMalformed
