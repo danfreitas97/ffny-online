@@ -235,7 +235,7 @@ func TestServerLobbyIntegration(t *testing.T) {
 	wb := b.recv().(Welcome)
 
 	// A creates a public room; B lists and finds it, then joins.
-	a.send(Create{Token: wa.Token, Settings: RoomSettings{Name: "Alice's", Public: 1, Mode: 0, Max: 4, Pool: []uint8{1, 6, 19}}})
+	a.send(Create{Token: wa.Token, Settings: RoomSettings{Name: "Alice's", Public: 1, Mode: 0, Max: 4, Pool: []uint8{1, 6, 11}}})
 	ra := a.recvType(TypeRoom).(RoomState)
 	if ra.You != 0 || ra.Host != 0 || len(ra.Players) != 1 {
 		t.Fatalf("A ROOM %#v", ra)

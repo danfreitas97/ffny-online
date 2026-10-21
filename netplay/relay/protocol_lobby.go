@@ -93,8 +93,13 @@ func safeFighter(f uint8) uint8 {
 	return f
 }
 
-// QuickPool is the venue pool of a room created by QUICK.
-var QuickPool = []uint8{1, 6, 19}
+// QuickPool is the venue pool of a room created by QUICK (The Foundation, The Terror Dome,
+// 125th Street Station).
+var QuickPool = []uint8{1, 6, 11}
+
+// UnsafeVenues are venue feIDs left out of every vote: The Pit (19), reported to crash online
+// (2026-10-21), until it is tested. A pool of only unsafe venues votes on QuickPool.
+var UnsafeVenues = map[uint8]bool{19: true}
 
 // RoomSettings is the Settings block of CREATE, SETTINGS and ROOM.
 type RoomSettings struct {

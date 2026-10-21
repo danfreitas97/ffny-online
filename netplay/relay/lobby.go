@@ -575,8 +575,17 @@ func (r *Relay) vote(now time.Time, c *client, choice uint8, reqLen int) []Packe
 func (r *Relay) drawCandidates(pool []uint8) []uint8 {
 	var seen [256]bool
 	var distinct []uint8
+	safe := false
 	for _, v := range pool {
-		if !seen[v] {
+		if !UnsafeVenues[v] {
+			safe = true
+		}
+	}
+	if !safe {
+		pool = QuickPool
+	}
+	for _, v := range pool {
+		if !seen[v] && !UnsafeVenues[v] {
 			seen[v] = true
 			distinct = append(distinct, v)
 		}

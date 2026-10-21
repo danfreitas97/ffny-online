@@ -151,7 +151,7 @@ func onlyRoomTo(t *testing.T, res []got, addr netip.AddrPort) RoomState {
 }
 
 func settings4(name string, public uint8) RoomSettings {
-	return RoomSettings{Name: name, Public: public, Mode: 1, Max: 4, Rounds: 0, Pool: []uint8{1, 6, 19}}
+	return RoomSettings{Name: name, Public: public, Mode: 1, Max: 4, Rounds: 0, Pool: []uint8{1, 6, 11}}
 }
 
 // room4 creates a room with settings4 hosted by the first address and joins
@@ -459,7 +459,7 @@ func TestLobbyReadyVoteStart(t *testing.T) {
 	if st.Phase != PhaseVoting || len(st.Candidates) != 3 || st.MsLeft != 15000 || len(st.Votes) != 3 {
 		t.Fatalf("vote did not start: %#v", st)
 	}
-	if st.Candidates[0] != 1 || st.Candidates[1] != 6 || st.Candidates[2] != 19 {
+	if st.Candidates[0] != 1 || st.Candidates[1] != 6 || st.Candidates[2] != 11 {
 		t.Fatalf("candidates %v", st.Candidates)
 	}
 	// READY is refused while voting; a stray OVER changes nothing.
@@ -544,7 +544,7 @@ func TestLobbyVoteTimeout(t *testing.T) {
 		}
 	}
 	res := l.advance(time.Second) // 15 s
-	if countType(res, TypeStart) != 3 || startOf(t, res, pC).Venue != 19 {
+	if countType(res, TypeStart) != 3 || startOf(t, res, pC).Venue != 11 {
 		t.Fatalf("timeout START %#v", res)
 	}
 	if st := roomOf(t, res, pC); st.Phase != PhasePlaying || st.MsLeft != 0 {
@@ -559,7 +559,7 @@ func TestLobbyVoteTimeout(t *testing.T) {
 	pick.vals = []int{2}
 	pick.calls = nil
 	res = l2.advance(15 * time.Second)
-	if v := startOf(t, res, pA).Venue; v != 19 || len(pick.calls) != 1 || pick.calls[0] != 3 {
+	if v := startOf(t, res, pA).Venue; v != 11 || len(pick.calls) != 1 || pick.calls[0] != 3 {
 		t.Fatalf("no-vote venue %d, intn calls %v", v, pick.calls)
 	}
 }
@@ -906,5 +906,33 @@ func TestLobbyUnsafeFighterReplaced(t *testing.T) {
 	start := startOf(t, l.castVote(pB, 0), pA)
 	if start.Players[0].Fighter != SafeFighter {
 		t.Fatalf("START %+v", start)
+	}
+}
+
+func TestLobbyUnsafeVenueLeftOut(t *testing.T) {
+	l := newLobby(t, Config{})
+	l.enter(pA, "a")
+	l.enter(pB, "b")
+	pit := RoomSettings{Name: "pit", Public: 1, Mode: 0, Max: 2, Pool: []uint8{19, 4}}
+	code := roomOf(t, l.mkRoom(pA, pit), pA).Room
+	l.joinCode(pB, code)
+	l.setReady(pA, 1)
+	st := roomOf(t, l.setReady(pB, 2), pA)
+	if len(st.Candidates) != 1 || st.Candidates[0] != 4 {
+		t.Fatalf("candidates %v", st.Candidates)
+	}
+	// Only unsafe venues: the quick-match pool instead.
+	l.over(pA)
+	l.leave(pA)
+	l.leave(pB)
+	l.enter(pC, "c")
+	l.enter(pD, "d")
+	only := RoomSettings{Name: "only", Public: 1, Mode: 0, Max: 2, Pool: []uint8{19}}
+	code = roomOf(t, l.mkRoom(pC, only), pC).Room
+	l.joinCode(pD, code)
+	l.setReady(pC, 1)
+	st = roomOf(t, l.setReady(pD, 2), pC)
+	if len(st.Candidates) != 3 || st.Candidates[0] != 1 || st.Candidates[1] != 6 || st.Candidates[2] != 11 {
+		t.Fatalf("candidates %v", st.Candidates)
 	}
 }
