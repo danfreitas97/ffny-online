@@ -276,6 +276,7 @@ class FfnyBot(discord.Client):
         await self.put(guild, "help", core.HELP_CHANNEL, content=core.HELP_PANEL, view=HelpPanel())
         await self.put(guild, "alerts", core.ANNOUNCEMENTS, content=core.ALERTS_TEXT, view=AlertToggle())
         await self.put(guild, "apply", core.APPLY_CHANNEL, content=core.APPLY_TEXT, view=ApplyPanel())
+        await self.put(guild, "support", core.SUPPORT_CHANNEL, content=core.SUPPORT_TEXT)
 
     # -- tickets --
 
@@ -558,8 +559,8 @@ async def status_cmd(interaction):
     embed.add_field(name="Newest build", value=("%d (%s)" % (manifest["build"], manifest["version"]))
                     if manifest else "unknown")
     embed.add_field(name="Server", value=core.status_name(summary))
-    embed.add_field(name="Links", value="[Download](%s) · [Disc guide](%s) · [GitHub](%s)" % (
-        core.DOWNLOAD, core.DISC_GUIDE, core.GITHUB), inline=False)
+    embed.add_field(name="Links", value="[Download](%s) · [Disc guide](%s) · [GitHub](%s) · [Support the servers](%s)" % (
+        core.DOWNLOAD, core.DISC_GUIDE, core.GITHUB, core.KOFI), inline=False)
     await interaction.followup.send(embed=embed)
 
 

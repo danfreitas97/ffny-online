@@ -11,6 +11,8 @@ GITHUB = "https://github.com/sweeax-exe/ffny-online"
 DOWNLOAD = GITHUB + "/releases/latest"
 DISC_GUIDE = GITHUB + "/blob/main/docs/dump-your-disc.md"
 ISSUES = GITHUB + "/issues"
+KOFI = "https://ko-fi.com/ffnyonline"
+SUPPORT_CHANNEL = "support-the-project"
 UPDATE_URL = "http://play.defjam.online:27778/latest.json"
 ACCOUNTS_URL = "http://127.0.0.1:8091"      # the account service's local listener for the bot
 
@@ -29,7 +31,8 @@ LEADERBOARD_MIN = 3        # the account service's LeaderboardMin
 # Channel kinds: read (everyone reads, only the team and the bot write), chat, team (team only),
 # voice, and stat (the player count in its name; nobody joins it).
 LAYOUT = [
-    ("📢 INFO", [("welcome", "read"), ("rules", "read"), ("announcements", "read"), ("status", "stat")]),
+    ("📢 INFO", [("welcome", "read"), ("rules", "read"), ("announcements", "read"), (SUPPORT_CHANNEL, "read"),
+                ("status", "stat")]),
     ("💬 COMMUNITY", [("general", "chat"), ("find-a-match", "chat"), ("clips-and-screens", "chat"),
                      ("ideas-and-feedback", "chat"), ("off-topic", "chat")]),
     ("🛠️ SUPPORT", [("get-help", "read"), ("faq", "read"), (APPLY_CHANNEL, "read")]),
@@ -92,6 +95,13 @@ TICKET_TYPES = {
     },
 }
 
+SUPPORT_TEXT = f"""# Support the project ❤️
+**FFNY Online is free and stays free.** Support only pays for the servers: the online relay, the accounts and stats, this Discord bot, and later servers in North America and other regions so everyone gets a good ping.
+
+☕ **Ko-fi:** {KOFI}
+
+No perks and no paywalls: supporting is completely voluntary, and everyone gets the same game. Thank you!"""
+
 APPLY_TEXT = """# Join the FFNY Team 🛡️
 FFNY Online is growing fast, and we'd love some help keeping the community a good place: welcoming new players, answering questions, helping in tickets and keeping the chat clean.
 
@@ -113,6 +123,7 @@ FFNY Online is an unofficial fan project, based on Vlad Yanhursky's native PC po
 💿 Dump your disc: {DISC_GUIDE}
 🛠️ Problems? Open a ticket in #get-help
 🎮 Looking for opponents? #find-a-match
+❤️ Help pay for the servers: {KOFI}
 
 Read #rules, then come and fight."""
 
@@ -163,7 +174,7 @@ Everyone in a match needs the same build. Want the pings yourself? Pick *Match c
 
 # Discord's onboarding for new members (needs a Community server). Default channels everyone
 # sees: Discord asks for at least seven, five of them ones @everyone can write in.
-ONBOARDING_DEFAULTS = ["welcome", "rules", "announcements", "get-help", "faq", APPLY_CHANNEL, "general", "find-a-match",
+ONBOARDING_DEFAULTS = ["welcome", "rules", "announcements", SUPPORT_CHANNEL, "get-help", "faq", APPLY_CHANNEL, "general", "find-a-match",
                        "clips-and-screens", "ideas-and-feedback", "off-topic"]
 # Questions: (key, title, [(key, emoji, title, description, roles, channels)]).
 ONBOARDING_PROMPTS = [
