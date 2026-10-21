@@ -15,7 +15,8 @@ User=defjam-relay
 Group=defjam-relay
 # UDP 27777: the relay. TCP 27778: the launcher's signed update files from /opt/defjam-relay/updates
 # (scripts/publish-update.ps1 puts them there; the launcher checks the signature itself).
-ExecStart=/opt/defjam-relay/relay -listen :27777 -max-rooms 512 -max-clients 1024 -log-interval 60s -updates-listen :27778 -updates-dir /opt/defjam-relay/updates
+# Ranked play asks the account service's local internal listener (ffny-accounts.service).
+ExecStart=/opt/defjam-relay/relay -listen :27777 -max-rooms 512 -max-clients 1024 -log-interval 60s -updates-listen :27778 -updates-dir /opt/defjam-relay/updates -accounts-internal http://127.0.0.1:8091
 Restart=on-failure
 RestartSec=2s
 # The relay keeps no state on disk and needs no privileges (port > 1024).
