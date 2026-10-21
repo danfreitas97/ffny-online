@@ -15,6 +15,8 @@ UPDATE_URL = "http://play.defjam.online:27778/latest.json"
 ACCOUNTS_URL = "http://127.0.0.1:8091"      # the account service's local listener for the bot
 
 TEAM_ROLE = "FFNY Team"
+MOD_ROLE = "Moderator"
+APPLY_CHANNEL = "join-the-team"
 ALERT_ROLE = "Build Alerts"
 MATCH_ROLE = "Match Ping"
 TICKET_CATEGORY = "🎫 TICKETS"
@@ -30,7 +32,7 @@ LAYOUT = [
     ("📢 INFO", [("welcome", "read"), ("rules", "read"), ("announcements", "read"), ("status", "stat")]),
     ("💬 COMMUNITY", [("general", "chat"), ("find-a-match", "chat"), ("clips-and-screens", "chat"),
                      ("ideas-and-feedback", "chat"), ("off-topic", "chat")]),
-    ("🛠️ SUPPORT", [("get-help", "read"), ("faq", "read")]),
+    ("🛠️ SUPPORT", [("get-help", "read"), ("faq", "read"), (APPLY_CHANNEL, "read")]),
     ("🎮 VOICE", [("Lobby", "voice"), ("Match 1", "voice"), ("Match 2", "voice")]),
     (TICKET_CATEGORY, []),
     ("🔒 TEAM", [("team-chat", "team"), (TICKET_LOG, "team")]),
@@ -75,7 +77,31 @@ TICKET_TYPES = {
             ("message", "Your message", "paragraph", True, ""),
         ],
     },
+    # Applications: only the applicant and the server's admins see them (not the whole team).
+    "apply": {
+        "label": "Apply as moderator", "emoji": "🛡️", "prefix": "apply", "private": True,
+        "fields": [
+            ("why", "Why do you want to help?", "paragraph", True,
+             "What would you like to do for the community?"),
+            ("experience", "Moderation experience", "paragraph", False,
+             "Other servers or communities, if any"),
+            ("time", "Timezone and when you're online", "short", True, "e.g. CET, evenings and weekends"),
+            ("languages", "Languages you speak", "short", True, "e.g. English, French"),
+            ("age", "Are you 16 or older?", "short", True, "yes / no"),
+        ],
+    },
 }
+
+APPLY_TEXT = """# Join the FFNY Team 🛡️
+FFNY Online is growing fast, and we'd love some help keeping the community a good place: welcoming new players, answering questions, helping in tickets and keeping the chat clean.
+
+**What a moderator does:** helps in #get-help tickets, removes spam, gives timeouts when someone breaks the #rules, and keeps things friendly.
+**What we ask:** be patient and fair, know the game a bit, and have some time now and then.
+
+Press the button and fill in the short form. Only the server's admins see your application."""
+
+APPLY_ACCEPTED = "Welcome to the FFNY Team! 🎉 You now have the Moderator role: you see the team channels and every ticket. Thanks for helping out."
+APPLY_DECLINED = "Thanks a lot for applying to the FFNY Team. We can't take you on right now, but we really appreciate it, and you're welcome to apply again later."
 
 WELCOME = f"""# Welcome to FFNY Online 👊
 **Def Jam: Fight for NY** on PC, with online multiplayer: quick match, rooms, your own fighter and a venue vote, right in the game's main menu.
@@ -134,7 +160,7 @@ Everyone in a match needs the same build. Want the pings yourself? Pick *Match c
 
 # Discord's onboarding for new members (needs a Community server). Default channels everyone
 # sees: Discord asks for at least seven, five of them ones @everyone can write in.
-ONBOARDING_DEFAULTS = ["welcome", "rules", "announcements", "get-help", "faq", "general", "find-a-match",
+ONBOARDING_DEFAULTS = ["welcome", "rules", "announcements", "get-help", "faq", APPLY_CHANNEL, "general", "find-a-match",
                        "clips-and-screens", "ideas-and-feedback", "off-topic"]
 # Questions: (key, title, [(key, emoji, title, description, roles, channels)]).
 ONBOARDING_PROMPTS = [

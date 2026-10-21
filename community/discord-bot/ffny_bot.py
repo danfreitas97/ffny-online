@@ -67,6 +67,8 @@ class FfnyBot(discord.Client):
         self.add_view(HelpPanel())
         self.add_view(TicketControls())
         self.add_view(AlertToggle())
+        self.add_view(ApplyPanel())
+        self.add_view(ApplicationControls())
 
     def guild(self):
         want = os.environ.get("FFNY_BOT_GUILD")
@@ -108,6 +110,12 @@ class FfnyBot(discord.Client):
         for name in (core.ALERT_ROLE, core.MATCH_ROLE):
             if not self.role(guild, name):
                 await guild.create_role(name=name, mentionable=True, reason="FFNY bot layout")
+        if not self.role(guild, core.MOD_ROLE):
+            # Moderation without kicks or bans: those stay with the owner.
+            perms = discord.Permissions(manage_messages=True, moderate_members=True, manage_threads=True,
+                                        mute_members=True, move_members=True, read_message_history=True)
+            await guild.create_role(name=core.MOD_ROLE, permissions=perms, colour=discord.Colour(0x3BA55D),
+                                    hoist=True, mentionable=True, reason="FFNY bot layout")
         everyone, me = guild.default_role, guild.me
         bot_all = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True,
                                               manage_messages=True, embed_links=True, attach_files=True,
@@ -267,6 +275,7 @@ class FfnyBot(discord.Client):
         await self.put(guild, "faq", "faq", embed=faq)
         await self.put(guild, "help", core.HELP_CHANNEL, content=core.HELP_PANEL, view=HelpPanel())
         await self.put(guild, "alerts", core.ANNOUNCEMENTS, content=core.ALERTS_TEXT, view=AlertToggle())
+        await self.put(guild, "apply", core.APPLY_CHANNEL, content=core.APPLY_TEXT, view=ApplyPanel())
 
     # -- tickets --
 
@@ -288,7 +297,8 @@ class FfnyBot(discord.Client):
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True,
                                                   read_message_history=True, attach_files=True),
         }
-        if team:
+        private = info.get("private", False)       # applications: the applicant and the admins only
+        if team and not private:
             over[team] = discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True,
                                                      manage_messages=True, read_message_history=True)
         channel = await guild.create_text_channel(
@@ -302,6 +312,11 @@ class FfnyBot(discord.Client):
             value = answers.get(key, "").strip()
             if value:
                 embed.add_field(name=label, value=value[:1024], inline=False)
+        if private:
+            embed.set_footer(text="Only you and the server's admins see this channel.")
+            await channel.send(user.mention, embed=embed, view=ApplicationControls(),
+                               allowed_mentions=discord.AllowedMentions(users=True))
+            return channel
         embed.set_footer(text="Add screenshots or logs here. Setup logs: %LOCALAPPDATA%\\DefJamSetup\\logs")
         ping = user.mention + (" " + team.mention if team else "")
         await channel.send(ping, embed=embed, view=TicketControls(),
@@ -313,6 +328,10 @@ class FfnyBot(discord.Client):
         channel = self.text_channel(guild, core.TICKET_LOG)
         if channel:
             await channel.send(text, file=file, allowed_mentions=discord.AllowedMentions.none())
+
+    def is_admin(self, member):
+        perms = getattr(member, "guild_permissions", None)
+        return bool(perms and (perms.administrator or perms.manage_guild))
 
     def is_team(self, member):
         return any(r.name == core.TEAM_ROLE for r in getattr(member, "roles", [])) or \
@@ -338,9 +357,10 @@ class FfnyBot(discord.Client):
                           [a.url for a in m.attachments]))
         text = core.transcript(channel.name, lines).encode("utf-8")
         owner = interaction.guild.get_member(ticket["owner"])
-        await self.ticket_log(interaction.guild, "📪 %s closed #%s (opened by <@%d>)" % (
-            interaction.user.mention, channel.name, ticket["owner"]),
-            file=discord.File(io.BytesIO(text), filename=channel.name + ".txt"))
+        if not core.TICKET_TYPES.get(ticket["kind"], {}).get("private"):     # applications stay with the admins
+            await self.ticket_log(interaction.guild, "📪 %s closed #%s (opened by <@%d>)" % (
+                interaction.user.mention, channel.name, ticket["owner"]),
+                file=discord.File(io.BytesIO(text), filename=channel.name + ".txt"))
         if owner:
             try:
                 await owner.send("Your FFNY Online ticket #%s is closed. Thanks for the report! Transcript:" % channel.name,
@@ -384,6 +404,8 @@ class HelpPanel(discord.ui.View):
         styles = {"bug": discord.ButtonStyle.danger, "setup": discord.ButtonStyle.primary,
                   "online": discord.ButtonStyle.success, "other": discord.ButtonStyle.secondary}
         for kind, info in core.TICKET_TYPES.items():
+            if info.get("private"):
+                continue                # its own panel in #join-the-team
             button = discord.ui.Button(label=info["label"], emoji=info["emoji"], style=styles[kind],
                                        custom_id="ffny:ticket:" + kind)
             button.callback = self.opener(kind)
@@ -393,7 +415,13 @@ class HelpPanel(discord.ui.View):
     def opener(kind):
         async def callback(interaction):
             mine = [c for c in bot.open_tickets(interaction.user.id) if interaction.guild.get_channel(c)]
-            if len(mine) >= core.MAX_OPEN_TICKETS:
+            if kind == "apply":
+                open_apps = [c for c in mine if bot.state["tickets"][str(c)]["kind"] == "apply"]
+                if open_apps:
+                    await interaction.response.send_message("Your application is already open: <#%d>." % open_apps[0],
+                                                            ephemeral=True)
+                    return
+            elif len(mine) >= core.MAX_OPEN_TICKETS:
                 await interaction.response.send_message(
                     "You already have open tickets: %s. Close one first." % " ".join("<#%d>" % c for c in mine),
                     ephemeral=True)
@@ -414,6 +442,59 @@ class TicketControls(discord.ui.View):
         await interaction.response.send_message("%s is on it." % interaction.user.mention)
 
     @discord.ui.button(label="Close", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="ffny:close")
+    async def close(self, interaction, button):
+        await bot.close_ticket(interaction)
+
+
+class ApplyPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        info = core.TICKET_TYPES["apply"]
+        button = discord.ui.Button(label=info["label"], emoji=info["emoji"], style=discord.ButtonStyle.success,
+                                   custom_id="ffny:ticket:apply")
+        button.callback = HelpPanel.opener("apply")
+        self.add_item(button)
+
+
+class ApplicationControls(discord.ui.View):
+    """Under an application: the admins accept or decline it; either side can close it."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def decide(self, interaction, accept):
+        ticket = bot.state["tickets"].get(str(interaction.channel.id))
+        if not bot.is_admin(interaction.user):
+            await interaction.response.send_message("Only the server's admins decide on applications.", ephemeral=True)
+            return
+        if ticket is None:
+            await interaction.response.send_message("This application is already closed.", ephemeral=True)
+            return
+        member = interaction.guild.get_member(ticket["owner"])
+        if member is None:
+            await interaction.response.send_message("The applicant has left the server.", ephemeral=True)
+            return
+        if accept:
+            roles = [r for r in (bot.role(interaction.guild, core.MOD_ROLE), bot.role(interaction.guild, core.TEAM_ROLE))
+                     if r]
+            await member.add_roles(*roles, reason="moderator application accepted by %s" % interaction.user)
+        text = core.APPLY_ACCEPTED if accept else core.APPLY_DECLINED
+        await interaction.response.send_message("%s %s" % (member.mention, text),
+                                                allowed_mentions=discord.AllowedMentions(users=True))
+        try:
+            await member.send(text)
+        except discord.HTTPException:
+            pass        # DMs closed; the message in the channel says it too
+
+    @discord.ui.button(label="Accept", emoji="✅", style=discord.ButtonStyle.success, custom_id="ffny:apply:accept")
+    async def accept(self, interaction, button):
+        await self.decide(interaction, True)
+
+    @discord.ui.button(label="Decline", emoji="✖️", style=discord.ButtonStyle.secondary, custom_id="ffny:apply:decline")
+    async def decline(self, interaction, button):
+        await self.decide(interaction, False)
+
+    @discord.ui.button(label="Close", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="ffny:apply:close")
     async def close(self, interaction, button):
         await bot.close_ticket(interaction)
 
