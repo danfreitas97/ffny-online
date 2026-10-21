@@ -182,9 +182,11 @@ func (s *Store) Settle(now time.Time) (counted, dropped int) {
 				a.stats().add(r, p.first)
 			}
 		}
+		s.rankedResult(key, p, now)
 		counted++
 		s.dirty = true
 	}
+	s.expirePairings(now)
 	return counted, dropped
 }
 
@@ -259,6 +261,7 @@ type PublicStats struct {
 	Favorite     int           `json:"favorite"` // fighter id, -1 none
 	FavoriteName string        `json:"favorite_name"`
 	Rank         int           `json:"rank"` // place on the leaderboard, 0 not on it
+	Ranked       *PublicRanked `json:"ranked,omitempty"`
 	Recent       []MatchLine   `json:"recent"`
 }
 
@@ -268,7 +271,7 @@ const LeaderboardMin = 3
 func (s *Store) publicStats(a *Account, rank int) PublicStats {
 	st := a.stats()
 	p := PublicStats{Account: public(*a), Matches: st.Matches, Wins: st.Wins, Losses: st.Losses, Draws: st.Draws,
-		Streak: st.Streak, BestStreak: st.BestStreak, Favorite: -1, Rank: rank, Recent: st.Recent}
+		Streak: st.Streak, BestStreak: st.BestStreak, Favorite: -1, Rank: rank, Recent: st.Recent, Ranked: a.publicRanked()}
 	if p.Recent == nil {
 		p.Recent = []MatchLine{}
 	}

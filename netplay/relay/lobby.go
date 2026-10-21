@@ -255,6 +255,7 @@ func (r *Relay) endVote(now time.Time, rm *room) []Packet {
 		c.over = false
 	}
 	rm.start = mustEncode(st)
+	r.rankedStart(rm, st.Seed)
 	rm.phase = PhasePlaying
 	rm.playStart = now
 	r.cfg.Logf("room %s started venue=%d players=%d", rm.code, venue, len(st.Players))
@@ -310,9 +311,13 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 		return r.list(c, m)
 	case Who:
 		return r.who(c)
+	case Ranked:
+		return r.ranked(now, c, m, reqLen)
 	case Create:
+		r.dequeue(c)
 		return r.create(now, c, m.Settings, reqLen)
 	case Join:
+		r.dequeue(c)
 		if c.room != nil {
 			if c.room.code != m.Room {
 				return r.errorTo(c.addr, ErrRoomState, reqLen) // already in another room
@@ -330,6 +335,7 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 		rm.place(c, slot)
 		return r.joined(now, rm, c)
 	case Quick:
+		r.dequeue(c)
 		return r.quick(now, c, m, reqLen)
 	case SetSettings:
 		return r.setSettings(now, c, m.Settings, reqLen)
@@ -350,6 +356,11 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 	case Vote:
 		return r.vote(now, c, m.Choice, reqLen)
 	case Leave:
+		if c.queue != nil {
+			r.dequeue(c)
+			r.cfg.Logf("ranked: c=%s left the queue", c.id)
+			return []Packet{r.queueTo(now, c, QueueOff)}
+		}
 		if c.room == nil {
 			return nil // a retry after the LEAVE took effect: nothing to do
 		}
@@ -508,7 +519,7 @@ func (r *Relay) setSettings(now time.Time, c *client, s RoomSettings, reqLen int
 	if rm == nil {
 		return r.errorTo(c.addr, ErrRoomState, reqLen)
 	}
-	if rm.host() != c || rm.phase != PhaseLobby || rm.legacy {
+	if rm.host() != c || rm.phase != PhaseLobby || rm.legacy || rm.ranked {
 		return r.errorTo(c.addr, ErrNotAllowed, reqLen)
 	}
 	if !validName(s.Name) {

@@ -25,6 +25,10 @@ type Config struct {
 	VoteTime          time.Duration // length of the venue vote (default 15 s)
 	PlayTimeout       time.Duration // a match without every OVER returns to the lobby after this (default 30 min)
 
+	// Ranked enables the ranked queue (RANKED); the Server sets it when it has an account
+	// service to check tickets with. Off, RANKED is answered QUEUE refused.
+	Ranked bool
+
 	// Rand is the randomness source for room codes, tokens, match seeds and
 	// the log salt. Default: crypto/rand.Reader. Tests may inject a
 	// deterministic reader.
@@ -116,6 +120,9 @@ type client struct {
 	fighter uint8 // from the last READY; FighterNone before
 	vote    uint8 // candidate index, or VoteNone
 	over    bool  // sent OVER for the current match
+
+	queue   *queued // in the ranked queue (ranked.go), nil if not
+	account int64   // the account the account service vouched for (ranked), 0 none
 }
 
 // room holds up to MaxSlots clients.
@@ -137,6 +144,11 @@ type room struct {
 	voteEnd    time.Time // phase 1
 	playStart  time.Time // phase 2
 	start      []byte    // phase 2: the encoded START, re-sent on a late VOTE
+
+	// ranked rooms come from the ranked queue: fixed settings, and their matches are reported
+	// to the account service while they hold the two paired accounts.
+	ranked         bool
+	rankedAccounts [2]int64
 }
 
 // source is the rate-limit state of one source IP (IPv6: one /64).
@@ -169,6 +181,10 @@ type Relay struct {
 	stats   Stats
 	lastGC  time.Time
 	roomSeq uint64
+
+	queue    []*queued // the ranked queue, in arrival order
+	lookups  []RankedLookup
+	pairings []RankedPairing
 }
 
 // NewRelay builds a state machine with the given limits.
@@ -404,6 +420,7 @@ func (r *Relay) auth(now time.Time, from netip.AddrPort, src *source, tok Token,
 func (r *Relay) removeClient(now time.Time, c *client, reason string) []Packet {
 	delete(r.clients, c.addr)
 	delete(r.byToken, c.token)
+	r.dequeue(c)
 	if c.room == nil {
 		r.cfg.Logf("lobby left by c=%s reason=%s", c.id, reason)
 		return nil
@@ -424,6 +441,7 @@ func (r *Relay) Tick(now time.Time) []Packet {
 	for _, rm := range r.rooms {
 		out = append(out, r.tickRoom(now, rm)...)
 	}
+	out = append(out, r.tickRanked(now)...)
 	for code, rm := range r.rooms {
 		if !rm.legacy || rm.everFull || now.Sub(rm.created) < r.cfg.RoomExpiry {
 			continue

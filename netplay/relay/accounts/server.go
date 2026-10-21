@@ -81,6 +81,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/matches", s.report)
 	mux.HandleFunc("GET /api/me/stats", s.myStats)
 	mux.HandleFunc("GET /api/leaderboard", s.leaderboard)
+	mux.HandleFunc("POST /api/ranked/ticket", s.rankedTicket)
 	mux.HandleFunc("GET /privacy", s.privacy)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	return mux
@@ -332,6 +333,23 @@ func (s *Server) myStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+// rankedTicket gives a signed-in game a one-time ticket for the relay's ranked queue.
+func (s *Server) rankedTicket(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.store.Session(bearer(r), s.now())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not signed in"})
+		return
+	}
+	t := s.store.NewTicket(a.ID, s.now())
+	if r.URL.Query().Get("format") == "text" { // for the game: the ticket alone
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		io.WriteString(w, t+"\n")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ticket": t, "expires_in": int(TicketLifetime / time.Second)})
+}
+
 func (s *Server) leaderboard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"entries": s.store.Leaderboard(10, false), "min_matches": LeaderboardMin})
 }
@@ -346,6 +364,45 @@ func (s *Server) Internal() http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, st)
+	})
+	// The relay, for ranked play: a ticket's account, and the ranked matches it starts.
+	mux.HandleFunc("POST /internal/ranked/redeem", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Ticket string `json:"ticket"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+			return
+		}
+		a, rt, ok := s.store.RedeemTicket(in.Ticket, s.now())
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such ticket"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"account": a.ID, "name": a.Name, "rating": rt.Rating, "deviation": rt.Deviation})
+	})
+	mux.HandleFunc("POST /internal/ranked/pairing", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Key   string `json:"key"`
+			Seats []struct {
+				Slot    int   `json:"slot"`
+				Account int64 `json:"account"`
+			} `json:"seats"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+			return
+		}
+		seats := map[int]int64{}
+		for _, st := range in.Seats {
+			seats[st.Slot] = st.Account
+		}
+		if len(seats) != len(in.Seats) || !s.store.Pair(in.Key, seats, s.now()) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pairing not taken"})
+			return
+		}
+		log.Printf("accounts: ranked match %s paired", in.Key)
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /internal/leaderboard", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"entries": s.store.Leaderboard(10, true), "min_matches": LeaderboardMin})

@@ -18,14 +18,15 @@ import (
 
 // Account is one player. Only what the game shows is kept: Discord's id, names and avatar.
 type Account struct {
-	ID        int64     `json:"id"`
-	DiscordID string    `json:"discord_id"`
-	Username  string    `json:"username"`
-	Name      string    `json:"name"` // Discord's display name, or the username
-	Avatar    string    `json:"avatar,omitempty"`
-	Created   time.Time `json:"created"`
-	LastSeen  time.Time `json:"last_seen"`
-	Stats     *Stats    `json:"stats,omitempty"`
+	ID        int64        `json:"id"`
+	DiscordID string       `json:"discord_id"`
+	Username  string       `json:"username"`
+	Name      string       `json:"name"` // Discord's display name, or the username
+	Avatar    string       `json:"avatar,omitempty"`
+	Created   time.Time    `json:"created"`
+	LastSeen  time.Time    `json:"last_seen"`
+	Stats     *Stats       `json:"stats,omitempty"`
+	Ranked    *RankedStats `json:"ranked,omitempty"`
 }
 
 type session struct {
@@ -48,7 +49,10 @@ type Store struct {
 	accounts  map[int64]*Account
 	byDiscord map[string]int64
 	sessions  map[string]*session
-	pending   map[string]*pendingMatch // match reports waiting for the others (not saved)
+	pending   map[string]*pendingMatch  // match reports waiting for the others (not saved)
+	tickets   map[string]ticket         // ranked tickets by hash (not saved)
+	pairings  map[string]*rankedPairing // ranked matches the relay started (not saved)
+	pairDays  map[string]int            // ranked games per pair today (not saved)
 	dirty     bool
 }
 
@@ -98,6 +102,10 @@ func (s *Store) Save() error {
 			st.Fighters, st.FNames = copyMap(a.Stats.Fighters), copyMap(a.Stats.FNames)
 			st.Recent = append([]MatchLine(nil), a.Stats.Recent...)
 			c.Stats = &st
+		}
+		if a.Ranked != nil {
+			r := *a.Ranked
+			c.Ranked = &r
 		}
 		d.Accounts = append(d.Accounts, &c)
 	}

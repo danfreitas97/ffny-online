@@ -16,6 +16,10 @@ type ServerConfig struct {
 	LogInterval  time.Duration // summary line period (default 60 s; negative disables)
 	Now          func() time.Time
 	Logf         func(format string, args ...any) // default log.Printf
+
+	// Accounts checks ranked tickets and takes the ranked pairings (ranked play is off
+	// without it).
+	Accounts Accounts
 }
 
 // Server reads datagrams from one UDP socket and feeds them to a Relay.
@@ -45,6 +49,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Relay.Logf == nil {
 		cfg.Relay.Logf = cfg.Logf
 	}
+	cfg.Relay.Ranked = cfg.Accounts != nil
 	r, err := NewRelay(cfg.Relay)
 	if err != nil {
 		return nil, err
@@ -90,8 +95,10 @@ func (s *Server) Serve(ctx context.Context, conn *net.UDPConn) error {
 		}
 		s.mu.Lock()
 		out := s.relay.Handle(s.cfg.Now(), from, buf[:n])
+		lookups, pairings := s.relay.TakeRankedWork()
 		s.mu.Unlock()
 		send(conn, out)
+		s.rankedWork(ctx, conn, lookups, pairings)
 	}
 }
 
@@ -115,8 +122,10 @@ func (s *Server) timerLoop(ctx context.Context, conn *net.UDPConn) {
 		case <-tick.C:
 			s.mu.Lock()
 			out := s.relay.Tick(s.cfg.Now())
+			lookups, pairings := s.relay.TakeRankedWork()
 			s.mu.Unlock()
 			send(conn, out)
+			s.rankedWork(ctx, conn, lookups, pairings)
 		case <-logC:
 			now := s.cfg.Now()
 			s.mu.Lock()
@@ -134,6 +143,37 @@ func (s *Server) timerLoop(ctx context.Context, conn *net.UDPConn) {
 				float64(st.PacketsOut)/secs, float64(st.BytesOut)/secs,
 				st.Dropped)
 		}
+	}
+}
+
+// rankedWork asks the account service about new ranked tickets and tells it of new ranked
+// matches, each in its own goroutine, so the socket loop never waits for it.
+func (s *Server) rankedWork(ctx context.Context, conn *net.UDPConn, lookups []RankedLookup, pairings []RankedPairing) {
+	if s.cfg.Accounts == nil {
+		return
+	}
+	for _, l := range lookups {
+		go func() {
+			c, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			p, err := s.cfg.Accounts.Redeem(c, l.Ticket)
+			if err != nil && !errors.Is(err, ErrTicketRefused) {
+				s.cfg.Logf("ranked: account service: %v", err)
+			}
+			s.mu.Lock()
+			out := s.relay.RankedChecked(s.cfg.Now(), l.Token, p, err == nil)
+			s.mu.Unlock()
+			send(conn, out)
+		}()
+	}
+	for _, p := range pairings {
+		go func() {
+			c, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if err := s.cfg.Accounts.Paired(c, p); err != nil {
+				s.cfg.Logf("ranked: the pairing of room %s did not reach the account service: %v", p.Room, err)
+			}
+		}()
 	}
 }
 

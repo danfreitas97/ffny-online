@@ -80,6 +80,7 @@ func main() {
 	logInterval := flag.Duration("log-interval", 60*time.Second, "period of the summary log line (0 disables)")
 	updatesListen := flag.String("updates-listen", "", "TCP address for the launcher's update files, e.g. :27778 (empty: off)")
 	updatesDir := flag.String("updates-dir", "", "folder holding latest.json, latest.json.sig and the setups")
+	accountsURL := flag.String("accounts-internal", "", "the account service's local internal listener for ranked play, e.g. http://127.0.0.1:8091 (empty: ranked off)")
 	flag.Parse()
 
 	if *maxRooms < 1 || *maxClients < 2 {
@@ -102,10 +103,15 @@ func main() {
 	_ = conn.SetReadBuffer(1 << 20)
 	_ = conn.SetWriteBuffer(1 << 20)
 
-	srv, err := relay.NewServer(relay.ServerConfig{
+	cfg := relay.ServerConfig{
 		Relay:       relay.Config{MaxRooms: *maxRooms, MaxClients: *maxClients},
 		LogInterval: li,
-	})
+	}
+	if *accountsURL != "" {
+		cfg.Accounts = relay.AccountsHTTP{Base: *accountsURL, Client: &http.Client{Timeout: 10 * time.Second}}
+		log.Printf("relay: ranked play on, accounts at %s", *accountsURL)
+	}
+	srv, err := relay.NewServer(cfg)
 	if err != nil {
 		log.Fatalf("relay: %v", err)
 	}

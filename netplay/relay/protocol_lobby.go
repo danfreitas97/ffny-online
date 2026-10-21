@@ -54,6 +54,22 @@ const (
 	TypeOver     MsgType = 0x1B // client -> server
 	TypeWho      MsgType = 0x1C // client -> server
 	TypePlayers  MsgType = 0x1D // server -> client
+	TypeRanked   MsgType = 0x1E // client -> server
+	TypeQueue    MsgType = 0x1F // server -> client
+)
+
+// TicketLen is the size of a ranked ticket: a one-time code from the account service that
+// stands for the player's account for a minute, so the long-lived session never travels
+// over UDP.
+const TicketLen = 16
+
+// QUEUE states.
+const (
+	QueueChecking  uint8 = 0 // the ticket is being checked with the account service
+	QueueSearching uint8 = 1 // in the ranked queue
+	QueueRefused   uint8 = 2 // not signed in, the ticket expired, or ranked play is off
+	QueueOff       uint8 = 3 // out of the queue (LEAVE)
+	QueueFound     uint8 = 4 // paired: the ranked room's ROOM follows
 )
 
 // Lobby ERROR codes.
@@ -169,6 +185,14 @@ type Over struct {
 	Token Token
 }
 
+// Ranked joins the ranked queue (One on One against a player of a similar rating) with the
+// fighter to play. Repeated while waiting it changes nothing but the fighter.
+type Ranked struct {
+	Token   Token
+	Ticket  [TicketLen]byte
+	Fighter uint8
+}
+
 // ---- server -> client ----
 
 // RoomInfo is one entry of ROOMS.
@@ -242,6 +266,16 @@ type Players struct {
 	List   []PlayerInfo
 }
 
+// Queue is the sender's place in the ranked queue: its state, how long it has searched and
+// how many are searching.
+type Queue struct {
+	State     uint8
+	Waited    uint16 // seconds
+	Searching uint16
+}
+
+func (Ranked) Type() MsgType      { return TypeRanked }
+func (Queue) Type() MsgType       { return TypeQueue }
 func (Who) Type() MsgType         { return TypeWho }
 func (Players) Type() MsgType     { return TypePlayers }
 func (List) Type() MsgType        { return TypeList }
@@ -273,6 +307,7 @@ func (m Vote) token() Token        { return m.Token }
 func (m Leave) token() Token       { return m.Token }
 func (m Over) token() Token        { return m.Token }
 func (m Who) token() Token         { return m.Token }
+func (m Ranked) token() Token      { return m.Token }
 
 // More encoding errors.
 var (
@@ -311,6 +346,16 @@ func (m Vote) appendBody(b []byte) ([]byte, error) {
 func (m Leave) appendBody(b []byte) ([]byte, error) { return append(b, m.Token[:]...), nil }
 func (m Over) appendBody(b []byte) ([]byte, error)  { return append(b, m.Token[:]...), nil }
 func (m Who) appendBody(b []byte) ([]byte, error)   { return append(b, m.Token[:]...), nil }
+
+func (m Ranked) appendBody(b []byte) ([]byte, error) {
+	return append(append(append(b, m.Token[:]...), m.Ticket[:]...), m.Fighter), nil
+}
+
+func (m Queue) appendBody(b []byte) ([]byte, error) {
+	b = append(b, m.State)
+	b = binary.LittleEndian.AppendUint16(b, m.Waited)
+	return binary.LittleEndian.AppendUint16(b, m.Searching), nil
+}
 
 func (m Players) appendBody(b []byte) ([]byte, error) {
 	if len(m.List) > 255 {
@@ -500,6 +545,11 @@ func decodeLobbyClient(t MsgType, body []byte) (Message, error) {
 		m = Over{Token: tok}
 	case TypeWho:
 		m = Who{Token: tok}
+	case TypeRanked:
+		rk := Ranked{Token: tok}
+		copy(rk.Ticket[:], c.take(TicketLen))
+		rk.Fighter = c.u8()
+		m = rk
 	default:
 		return nil, ErrMalformed
 	}
@@ -514,6 +564,12 @@ func decodeLobbyServer(t MsgType, body []byte) (Message, error) {
 	c := newCursor(body)
 	var m Message
 	switch t {
+	case TypeQueue:
+		q := Queue{State: c.u8(), Waited: c.u16(), Searching: c.u16()}
+		if q.State > QueueFound {
+			return nil, ErrMalformed
+		}
+		m = q
 	case TypePlayers:
 		p := Players{Online: c.u16(), Rooms: c.u16()}
 		n := int(c.u8())
