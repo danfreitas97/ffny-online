@@ -357,27 +357,28 @@ func TestLobbyQuick(t *testing.T) {
 	for _, a := range []netip.AddrPort{pA, pB, pC, pD, pE} {
 		l.enter(a, "q"+a.Addr().String()[len(a.Addr().String())-2:])
 	}
-	// Nobody waiting: A gets a new public room named after it, with the quick pool.
+	// Nobody waiting: A gets a new public room named "Quick: <A>", with the quick pool.
 	st := onlyRoomTo(t, l.quickM(pA, 0, 2), pA)
-	want := RoomSettings{Name: "q10", Public: 1, Mode: 0, Max: 2, Rounds: 0, Pool: QuickPool}
+	want := RoomSettings{Name: "Quick: q10", Public: 1, Mode: 0, Max: 2, Rounds: 0, Pool: QuickPool}
 	if st.You != 0 || st.Host != 0 || !st.Settings.equal(want) {
 		t.Fatalf("quick-created ROOM %#v", st)
 	}
 	first := st.Room
-	// Another max: a separate room.
-	second := onlyRoomTo(t, l.quickM(pB, 0, 3), pB).Room
-	if second == first {
-		t.Fatal("quick ignored max")
-	}
-	// Same mode and max: joins A's room (PEER too: it is a room of two).
-	res := l.quickM(pC, 0, 2)
-	if st := roomOf(t, res, pC); st.Room != first || st.You != 1 || countType(res, TypePeer) != 2 {
+	// Same mode, another max: joins A's room all the same (PEER too: it is a room of two).
+	res := l.quickM(pB, 0, 3)
+	if st := roomOf(t, res, pB); st.Room != first || st.You != 1 || countType(res, TypePeer) != 2 {
 		t.Fatalf("quick join %#v", res)
 	}
-	// A's room is full now: D gets a new room of two.
-	third := onlyRoomTo(t, l.quickM(pD, 0, 2), pD).Room
-	if third == first || third == second {
+	// A's room is full now: C gets a new room, and D joins C's.
+	second := onlyRoomTo(t, l.quickM(pC, 0, 2), pC).Room
+	if second == first {
 		t.Fatal("joined a full room")
+	}
+	if st := roomOf(t, l.quickM(pD, 0, 2), pD); st.Room != second {
+		t.Fatalf("quick should join C's waiting room, got %s", st.Room)
+	}
+	if quickName("a-very-long-player-name") != "Quick: a-very-long-playe" || len(quickName("ääääääääääääää")) > MaxNameLen {
+		t.Fatalf("quick names: %q", quickName("a-very-long-player-name"))
 	}
 	// Most players first, then the oldest.
 	l2 := newLobby(t, Config{})

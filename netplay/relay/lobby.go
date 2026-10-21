@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 	"time"
+	"unicode/utf8"
 )
 
 // This file holds the lobby extension of the state machine: generalised rooms
@@ -460,9 +461,10 @@ func (r *Relay) create(now time.Time, c *client, s RoomSettings, reqLen int) []P
 	return r.changed(now, rm)
 }
 
-// quick joins the public phase-0 room with that mode and max, the client's
-// build and a free slot that has the most players (then the oldest), or
-// creates one named after the player with QuickPool.
+// quick joins the public phase-0 room with that mode, the client's build and a
+// free slot that has the most players (then the oldest), whatever its size, or
+// creates one named "Quick: <player>" with QuickPool, so the room list shows it
+// as a quick match.
 func (r *Relay) quick(now time.Time, c *client, m Quick, reqLen int) []Packet {
 	if c.room != nil {
 		return r.alreadyInRoom(now, c)
@@ -470,7 +472,7 @@ func (r *Relay) quick(now time.Time, c *client, m Quick, reqLen int) []Packet {
 	var best *room
 	for _, rm := range r.rooms {
 		if rm.legacy || rm.settings.Public != 1 || rm.phase != PhaseLobby || rm.build != c.build ||
-			rm.settings.Mode != m.Mode || rm.settings.Max != m.Max {
+			rm.settings.Mode != m.Mode {
 			continue
 		}
 		if _, ok := rm.freeSlot(); !ok {
@@ -485,7 +487,18 @@ func (r *Relay) quick(now time.Time, c *client, m Quick, reqLen int) []Packet {
 		best.place(c, slot)
 		return r.joined(now, best, c)
 	}
-	return r.create(now, c, RoomSettings{Name: c.name, Public: 1, Mode: m.Mode, Max: m.Max, Pool: QuickPool}, reqLen)
+	return r.create(now, c, RoomSettings{Name: quickName(c.name), Public: 1, Mode: m.Mode, Max: m.Max, Pool: QuickPool}, reqLen)
+}
+
+// quickName is a quick-match room's name: "Quick: " and the player's name, cut to
+// MaxNameLen bytes on a character boundary.
+func quickName(player string) string {
+	name := "Quick: " + player
+	for len(name) > MaxNameLen {
+		_, size := utf8.DecodeLastRuneInString(name)
+		name = name[:len(name)-size]
+	}
+	return name
 }
 
 // setSettings replaces the room settings (the host only, in phase 0, not in a
