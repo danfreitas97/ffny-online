@@ -190,6 +190,23 @@ func (s *Store) Settle(now time.Time) (counted, dropped int) {
 	return counted, dropped
 }
 
+// ResetStats clears every account's casual statistics (a new leaderboard season) and returns how
+// many accounts had any. Accounts, sessions and ranked records stay.
+func (s *Store) ResetStats() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, a := range s.accounts {
+		if a.Stats != nil {
+			a.Stats = nil
+			n++
+		}
+	}
+	s.pending = nil
+	s.dirty = true
+	return n
+}
+
 func (a *Account) stats() *Stats {
 	if a.Stats == nil {
 		a.Stats = &Stats{}

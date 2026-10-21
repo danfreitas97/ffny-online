@@ -28,7 +28,21 @@ func main() {
 	clientID := flag.String("client-id", "", "the Discord application's client id")
 	secretFile := flag.String("client-secret-file", "", "file holding the Discord client secret")
 	internal := flag.String("internal-listen", "127.0.0.1:8091", "local address for the Discord bot (empty: off)")
+	resetStats := flag.Bool("reset-stats", false, "clear every account's casual statistics in -data (a new leaderboard season), save and exit; stop the service first")
 	flag.Parse()
+
+	if *resetStats {
+		store, err := accounts.Open(*data)
+		if err != nil {
+			log.Fatalf("accounts: %v", err)
+		}
+		n := store.ResetStats()
+		if err := store.Save(); err != nil {
+			log.Fatalf("accounts: save: %v", err)
+		}
+		log.Printf("accounts: statistics of %d account(s) cleared in %s", n, *data)
+		return
+	}
 
 	secret, err := os.ReadFile(*secretFile)
 	if err != nil || *clientID == "" {

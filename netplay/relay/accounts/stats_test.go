@@ -149,3 +149,30 @@ func TestStatsText(t *testing.T) {
 		}
 	}
 }
+
+func TestResetStats(t *testing.T) {
+	store, a, b, now := twoAccounts(t)
+	store.Report(a.ID, oneOnOne("ROOM-9-1", 0, 0), now)
+	store.Report(b.ID, oneOnOne("ROOM-9-1", 1, 0), now)
+	store.Settle(now.Add(ReportWindow))
+	token := store.NewSession(a.ID, now)
+	if n := store.ResetStats(); n != 2 {
+		t.Fatalf("reset %d accounts", n)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Open(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := again.StatsOf(a.ID); st.Matches != 0 || st.Wins != 0 || len(st.Recent) != 0 {
+		t.Fatalf("stats survived the reset: %+v", st)
+	}
+	if _, ok := again.Session(token, now); !ok {
+		t.Fatal("the reset signed the player out")
+	}
+	if len(again.Leaderboard(10, false)) != 0 {
+		t.Fatal("leaderboard not empty")
+	}
+}
