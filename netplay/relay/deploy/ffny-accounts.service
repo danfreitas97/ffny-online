@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 User=ffny-accounts
 Group=ffny-accounts
-ExecStart=/opt/ffny-accounts/accounts -listen 127.0.0.1:8090 -data /var/lib/ffny-accounts/accounts.json -public-url https://play.defjam.online -client-id 1562214133242400993 -client-secret-file /etc/ffny-accounts/client-secret
+ExecStart=/opt/ffny-accounts/accounts -listen 127.0.0.1:8090 -data /var/lib/ffny-accounts/accounts.json -public-url https://play.defjam.online -client-id 1562214133242400993 -client-secret-file /etc/ffny-accounts/client-secret -reports /var/lib/ffny-accounts/reports
 Restart=on-failure
 RestartSec=5
 StateDirectory=ffny-accounts

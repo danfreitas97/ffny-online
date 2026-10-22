@@ -28,6 +28,7 @@ func main() {
 	clientID := flag.String("client-id", "", "the Discord application's client id")
 	secretFile := flag.String("client-secret-file", "", "file holding the Discord client secret")
 	internal := flag.String("internal-listen", "127.0.0.1:8091", "local address for the Discord bot (empty: off)")
+	reportDir := flag.String("reports", "", "folder for the players' bug reports (empty: off)")
 	resetStats := flag.Bool("reset-stats", false, "clear every account's casual statistics in -data (a new leaderboard season), save and exit; stop the service first")
 	flag.Parse()
 
@@ -52,10 +53,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("accounts: %v", err)
 	}
+	var reports *accounts.Reports
+	if *reportDir != "" {
+		if reports, err = accounts.OpenReports(*reportDir); err != nil {
+			log.Fatalf("accounts: reports: %v", err)
+		}
+	}
 	srv := accounts.NewServer(accounts.Config{PublicURL: strings.TrimRight(*publicURL, "/"), ClientID: *clientID,
-		ClientSecret: strings.TrimSpace(string(secret))}, store)
+		ClientSecret: strings.TrimSpace(string(secret)), Reports: reports}, store)
 	httpSrv := &http.Server{Addr: *listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
+		ReadTimeout: 2 * time.Minute, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
