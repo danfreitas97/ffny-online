@@ -282,6 +282,9 @@ type PublicStats struct {
 	Recent       []MatchLine   `json:"recent"`
 }
 
+// LeaderboardPageSize is how many places one page of the game's leaderboard shows.
+const LeaderboardPageSize = 10
+
 // LeaderboardMin is how many matches put an account on the leaderboard.
 const LeaderboardMin = 3
 
@@ -371,11 +374,21 @@ type LeaderboardEntry struct {
 
 // Leaderboard is the first n places.
 func (s *Store) Leaderboard(n int, withDiscord bool) []LeaderboardEntry {
+	page, _ := s.LeaderboardPage(0, n, withDiscord)
+	return page
+}
+
+// LeaderboardPage is n places from place offset+1, and how many places the leaderboard has.
+func (s *Store) LeaderboardPage(offset, n int, withDiscord bool) ([]LeaderboardEntry, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []LeaderboardEntry{}
-	for i, a := range s.ranked() {
-		if i >= n {
+	list := s.ranked()
+	for i, a := range list {
+		if i < offset {
+			continue
+		}
+		if i >= offset+n {
 			break
 		}
 		p := s.publicStats(a, i+1)
@@ -385,7 +398,7 @@ func (s *Store) Leaderboard(n int, withDiscord bool) []LeaderboardEntry {
 		}
 		out = append(out, e)
 	}
-	return out
+	return out, len(list)
 }
 
 // StatsText is the game's form of an account's statistics and the leaderboard: one

@@ -176,3 +176,31 @@ func TestResetStats(t *testing.T) {
 		t.Fatal("leaderboard not empty")
 	}
 }
+
+func TestLeaderboardPages(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "a.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	var ids []int64
+	for i := 0; i < 23; i++ {
+		ids = append(ids, store.Upsert(string(rune('a'+i)), "p", "P", "", now).ID)
+	}
+	// player i wins i+3 matches against the next one
+	for i, id := range ids {
+		for k := 0; k < i+3; k++ {
+			key := "ROOM" + string(rune('A'+i)) + "-" + string(rune('a'+k)) + "-1"
+			store.Report(id, oneOnOne(key, 0, 0), now)
+		}
+	}
+	store.Settle(now.Add(ReportWindow))
+	first, total := store.LeaderboardPage(0, LeaderboardPageSize, false)
+	third, _ := store.LeaderboardPage(20, LeaderboardPageSize, false)
+	if total != 23 || len(first) != 10 || first[0].Rank != 1 || len(third) != 3 || third[0].Rank != 21 {
+		t.Fatalf("total %d, first %d (rank %d), third %d", total, len(first), first[0].Rank, len(third))
+	}
+	if first[0].Wins < first[9].Wins {
+		t.Fatal("not sorted")
+	}
+}

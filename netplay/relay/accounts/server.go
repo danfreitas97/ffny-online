@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -325,9 +326,14 @@ func (s *Server) myStats(w http.ResponseWriter, r *http.Request) {
 	}
 	st, _ := s.store.StatsOf(a.ID)
 	if r.URL.Query().Get("format") == "text" { // for the game: no JSON parser in C
+		// ?page=N: the leaderboard's places 10N+1..10N+10 (the game pages through it).
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		board, total := s.store.LeaderboardPage(max(0, page)*LeaderboardPageSize, LeaderboardPageSize, false)
+		pages := max(1, (total+LeaderboardPageSize-1)/LeaderboardPageSize)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		io.WriteString(w, StatsText(st, s.store.Leaderboard(10, false)))
+		io.WriteString(w, StatsText(st, board))
+		fmt.Fprintf(w, "board_page=%d\nboard_pages=%d\nboard_total=%d\n", min(max(0, page), pages-1), pages, total)
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
