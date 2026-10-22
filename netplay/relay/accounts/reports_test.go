@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"bytes"
+	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -94,5 +95,45 @@ func TestBugReportOff(t *testing.T) {
 	body, ctype := reportBody(t, "x", "")
 	if rec := sendReport(h, body, ctype, "203.0.113.5"); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("reports off: %d", rec.Code)
+	}
+}
+
+func TestReportsForTheBot(t *testing.T) {
+	_, store, _ := newTestServer(t, discordUser{ID: "1", Username: "masa"})
+	dir := filepath.Join(t.TempDir(), "reports")
+	reports, _ := OpenReports(dir)
+	s := NewServer(Config{PublicURL: "https://play.example", Reports: reports}, store)
+	h, in := s.Handler(), s.Internal()
+
+	body, ctype := reportBody(t, "boot\n[CRASH] Access violation at RIP=0x1\n  Xbox regs\n  in sub_0010A7D0+0x1E8\n", "\x89PNG\r\n\x1a\nx")
+	first := sendReport(h, body, ctype, "203.0.113.5").Body.String()
+	body, ctype = reportBody(t, "fine", "")
+	sendReport(h, body, ctype, "203.0.113.6")
+
+	rec := httptest.NewRecorder()
+	in.ServeHTTP(rec, httptest.NewRequest("GET", "/internal/reports", nil))
+	var list []ReportInfo
+	json.NewDecoder(rec.Body).Decode(&list)
+	if len(list) != 2 || list[0].ID != first || !list[0].Picture || list[1].Picture || list[0].Build != "18" ||
+		!strings.Contains(list[0].Crash, "[CRASH] Access violation") || !strings.Contains(list[0].Crash, "in sub_0010A7D0") ||
+		list[1].Crash != "" {
+		t.Fatalf("list: %+v", list)
+	}
+	rec = httptest.NewRecorder()
+	in.ServeHTTP(rec, httptest.NewRequest("GET", "/internal/reports?after="+list[0].Folder, nil))
+	list = nil // a fresh slice: Decode keeps fields the answer leaves out
+	json.NewDecoder(rec.Body).Decode(&list)
+	if len(list) != 1 || list[0].Crash != "" {
+		t.Fatalf("after: %+v", list)
+	}
+	rec = httptest.NewRecorder()
+	in.ServeHTTP(rec, httptest.NewRequest("GET", "/internal/reports/"+list[0].Folder+"/picture.png", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("no picture: %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	in.ServeHTTP(rec, httptest.NewRequest("GET", "/internal/reports/..%2F..%2Fetc/picture.png", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("path escape: %d", rec.Code)
 	}
 }

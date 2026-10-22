@@ -98,6 +98,7 @@ class FfnyBot(discord.Client):
         await self.tree.sync(guild=guild)
         watch_builds.start(self)
         update_status.start(self)
+        watch_reports.start(self)
 
     # -- layout --
 
@@ -663,6 +664,49 @@ async def watch_builds(client):
     if last != manifest["build"]:
         client.state["last_build"] = manifest["build"]
         save_state(client.state)
+
+
+async def accounts_bytes(path):
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
+            async with s.get(core.ACCOUNTS_URL + path) as r:
+                return await r.read() if r.status == 200 else None
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return None
+
+
+@tasks.loop(minutes=1)
+async def watch_reports(client):
+    """New F9 reports and crash logs (the account service keeps them) go to the team's channel."""
+    guild = client.guild()
+    channel = client.text_channel(guild, core.REPORTS_CHANNEL) if guild else None
+    if channel is None:
+        return
+    last = client.state.get("last_report")
+    status, reports = await accounts_get("/internal/reports" + ("?after=" + last if last else ""))
+    if status != 200 or not reports:
+        return
+    if last is None:            # first start: from now on, not the reports made before
+        client.state["last_report"] = reports[-1]["folder"]
+        save_state(client.state)
+        return
+    for info in reports:
+        embed = discord.Embed(title=core.report_title(info), colour=ORANGE, description=info.get("time", ""))
+        for name, value in core.report_fields(info):
+            embed.add_field(name=name, value=value, inline=name not in ("Crash", "Get it"))
+        picture = await accounts_bytes("/internal/reports/%s/picture.png" % info["folder"]) if info.get("picture") else None
+        try:
+            if picture:
+                embed.set_image(url="attachment://picture.png")
+                await channel.send(embed=embed, file=discord.File(io.BytesIO(picture), filename="picture.png"))
+            else:
+                await channel.send(embed=embed)
+        except discord.HTTPException as e:
+            log.warning("report %s not posted: %s", info.get("id"), e)
+            return
+        client.state["last_report"] = info["folder"]
+        save_state(client.state)
+        log.info("posted report %s", info.get("id"))
 
 
 @tasks.loop(minutes=10)     # Discord allows two channel renames per ten minutes

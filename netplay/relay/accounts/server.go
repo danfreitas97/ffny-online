@@ -366,6 +366,30 @@ func (s *Server) leaderboard(w http.ResponseWriter, r *http.Request) {
 // Internal is the bot's view, on its own local listener (never behind the public proxy).
 func (s *Server) Internal() http.Handler {
 	mux := http.NewServeMux()
+	// The Discord bot: new bug reports for the team's channel, and their pictures.
+	mux.HandleFunc("GET /internal/reports", func(w http.ResponseWriter, r *http.Request) {
+		if s.reports == nil {
+			writeJSON(w, http.StatusOK, []ReportInfo{})
+			return
+		}
+		list := s.reports.After(r.URL.Query().Get("after"), 20)
+		if list == nil {
+			list = []ReportInfo{}
+		}
+		writeJSON(w, http.StatusOK, list)
+	})
+	mux.HandleFunc("GET /internal/reports/{folder}/picture.png", func(w http.ResponseWriter, r *http.Request) {
+		path := ""
+		if s.reports != nil {
+			path = s.reports.Picture(r.PathValue("folder"))
+		}
+		if path == "" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		http.ServeFile(w, r, path)
+	})
 	mux.HandleFunc("GET /internal/discord/{id}", func(w http.ResponseWriter, r *http.Request) {
 		st, ok := s.store.StatsOfDiscord(r.PathValue("id"))
 		if !ok {

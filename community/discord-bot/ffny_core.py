@@ -23,6 +23,7 @@ ALERT_ROLE = "Build Alerts"
 MATCH_ROLE = "Match Ping"
 TICKET_CATEGORY = "🎫 TICKETS"
 TICKET_LOG = "ticket-log"
+REPORTS_CHANNEL = "bug-reports"   # F9 reports and crash logs from the games (team only)
 ANNOUNCEMENTS = "announcements"
 HELP_CHANNEL = "get-help"
 MAX_OPEN_TICKETS = 2
@@ -38,7 +39,7 @@ LAYOUT = [
     ("🛠️ SUPPORT", [("get-help", "read"), ("faq", "read"), (APPLY_CHANNEL, "read")]),
     ("🎮 VOICE", [("Lobby", "voice"), ("Match 1", "voice"), ("Match 2", "voice")]),
     (TICKET_CATEGORY, []),
-    ("🔒 TEAM", [("team-chat", "team"), (TICKET_LOG, "team")]),
+    ("🔒 TEAM", [("team-chat", "team"), (TICKET_LOG, "team"), (REPORTS_CHANNEL, "team")]),
 ]
 
 # The ticket forms. A Discord form holds at most five fields; a label is at most 45 characters
@@ -281,3 +282,19 @@ def leaderboard_lines(entries):
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     return ["%s **%s**  %d W · %d L · %d%%" % (medals.get(e["rank"], "`%2d.`" % e["rank"]), e["name"], e["wins"],
                                                e["losses"], e["win_rate"]) for e in entries]
+
+
+def report_title(info):
+    """The heading of a bug report from the account service's /internal/reports."""
+    crash = info.get("kind") == "crash" or bool(info.get("crash"))
+    return "%s %s %s" % ("💥" if crash else "🐞", "Crash report" if info.get("kind") == "crash" else "F9 report",
+                         info.get("id", "?"))
+
+
+def report_fields(info):
+    """(name, value) pairs for a report's embed; the crash line in a code block, cut to fit."""
+    fields = [("Build", info.get("build") or "?"), ("Player", (info.get("player") or "?")[:200]),
+              ("Get it", "`python scripts/bug-reports.py get %s`" % info.get("id", "?"))]
+    if info.get("crash"):
+        fields.append(("Crash", "```%s```" % info["crash"][:900].replace("`", "'")))
+    return fields

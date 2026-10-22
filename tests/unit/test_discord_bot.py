@@ -108,3 +108,15 @@ def test_profile_and_leaderboard_lines():
     lines = core.leaderboard_lines([{"rank": 1, "name": "Masa", "wins": 3, "losses": 0, "win_rate": 100},
                                     {"rank": 4, "name": "X", "wins": 1, "losses": 2, "win_rate": 33}])
     assert lines[0].startswith("🥇 **Masa**") and lines[1].startswith("` 4.` **X**")
+
+
+def test_report_texts():
+    crash = {"id": "a1b2c3", "kind": "crash", "build": "18", "player": "not signed in",
+             "crash": "[CRASH] Access violation | in sub_0010A7D0+0x1E8"}
+    assert core.report_title(crash).startswith("💥 Crash report a1b2c3")
+    fields = dict(core.report_fields(crash))
+    assert fields["Build"] == "18" and "a1b2c3" in fields["Get it"] and "sub_0010A7D0" in fields["Crash"]
+    f9 = {"id": "d4e5f6", "kind": "picture", "build": "18", "player": "account 1, Masa (@masa)"}
+    assert core.report_title(f9) == "🐞 F9 report d4e5f6"
+    assert "Crash" not in dict(core.report_fields(f9))
+    assert all(len(v) <= 1024 for _, v in core.report_fields(dict(crash, crash="x" * 5000)))

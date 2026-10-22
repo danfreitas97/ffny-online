@@ -27,7 +27,7 @@ import (
 //	log      the run log (the game cuts it to a head and a tail and blanks the Windows user folder)
 //	picture  a PNG of the screen (optional)
 //
-// Each report becomes a folder <dir>/<YYYYMMDD-HHMMSS>-<id>/ with info.txt, log.txt and
+// Each report becomes a folder <dir>/<YYYYMMDD-HHMMSS.mmm>-<id>/ with info.txt, log.txt and
 // picture.png. The sender's address is used for the rate limit only and is not written down.
 
 // Report limits.
@@ -142,7 +142,7 @@ func (s *Server) bugReport(w http.ResponseWriter, r *http.Request) {
 	var idb [3]byte
 	rand.Read(idb[:])
 	id := hex.EncodeToString(idb[:])
-	dir := filepath.Join(s.reports.dir, now.UTC().Format("20060102-150405")+"-"+id)
+	dir := filepath.Join(s.reports.dir, now.UTC().Format("20060102-150405.000")+"-"+id) // sorts by time
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		log.Printf("accounts: report: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "not saved"})
@@ -185,4 +185,92 @@ func (s *Server) bugReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+// ReportInfo is one report as the Discord bot lists it (Internal: GET /internal/reports).
+type ReportInfo struct {
+	Folder  string `json:"folder"`
+	ID      string `json:"id"`
+	Time    string `json:"time"`
+	Kind    string `json:"kind"`
+	Build   string `json:"build"`
+	Player  string `json:"player"`
+	Picture bool   `json:"picture"`
+	Crash   string `json:"crash,omitempty"` // the log's first [CRASH] line and where, for crash reports
+}
+
+var reportFolder = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}(\.[0-9]{3})?-[0-9a-f]{6}$`)
+
+// After lists up to n reports whose folder sorts after the given one, oldest first.
+func (r *Reports) After(after string, n int) []ReportInfo {
+	entries, err := os.ReadDir(r.dir)
+	if err != nil {
+		return nil
+	}
+	var out []ReportInfo
+	for _, e := range entries { // ReadDir sorts by name: by time
+		name := e.Name()
+		if !e.IsDir() || !reportFolder.MatchString(name) || name <= after {
+			continue
+		}
+		info := ReportInfo{Folder: name, ID: name[len(name)-6:]}
+		if b, err := os.ReadFile(filepath.Join(r.dir, name, "info.txt")); err == nil {
+			for _, line := range strings.Split(string(b), "\n") {
+				k, v, ok := strings.Cut(line, ": ")
+				if !ok {
+					continue
+				}
+				switch k {
+				case "time":
+					info.Time = v
+				case "kind":
+					info.Kind = v
+				case "build":
+					info.Build = v
+				case "player":
+					info.Player = v
+				}
+			}
+		}
+		if _, err := os.Stat(filepath.Join(r.dir, name, "picture.png")); err == nil {
+			info.Picture = true
+		}
+		info.Crash = crashLine(filepath.Join(r.dir, name, "log.txt"))
+		out = append(out, info)
+		if len(out) >= n {
+			break
+		}
+	}
+	return out
+}
+
+// crashLine is the log's first "[CRASH]" line and the "in sub_..." line after it, if any.
+func crashLine(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	text := string(b)
+	i := strings.Index(text, "[CRASH]")
+	if i < 0 {
+		return ""
+	}
+	rest := text[i:]
+	first, rest, _ := strings.Cut(rest, "\n")
+	if j := strings.Index(rest, "  in sub_"); j >= 0 && j < 4000 {
+		where, _, _ := strings.Cut(rest[j+2:], "\n")
+		first += " | " + where
+	}
+	if len(first) > 300 {
+		first = first[:300]
+	}
+	return first
+}
+
+// Picture is the path of a report's picture, or "" for a folder that is not a report.
+func (r *Reports) Picture(folder string) string {
+	if !reportFolder.MatchString(folder) {
+		return ""
+	}
+	return filepath.Join(r.dir, folder, "picture.png")
 }
