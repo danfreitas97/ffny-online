@@ -490,6 +490,8 @@ const privacyText = `<h1>Privacy</h1>
 <p>Your statistics are shown to you in the game, and your name, wins and losses on the public leaderboard (in the game and on the project's Discord, where members can also look up your statistics with /profile).</p>
 <p>Nothing else is read from Discord (only the <em>identify</em> permission), and Discord's own login token is not kept.
 The data is stored on the project's server in Germany and is not shared or sold.</p>
+<h2>Voice chat</h2>
+<p>In an online room the game can send your voice to the other players of that room: while you hold the push-to-talk key (T by default), or while you speak if you chose open microphone. It goes live through the project's relay server to those players only and is neither recorded nor stored. You can turn it off, change the key or mute the others in the launcher (Online).</p>
 <h2>Bug reports</h2>
 <p>When you press <em>F9</em> in the game, or choose to send a report after a crash, the game sends the developers its log of the current session and a picture of the screen. The log is how the game ran: your graphics card, settings, the fighters and venues loaded, any errors. Your Windows user folder is blanked in it. If you are signed in, the report names your account so we can answer you. Reports are kept on the same server, read only by the developers, and deleted when the bug is fixed. Your address is used only to limit how many reports one PC can send and is not stored.</p>
 <h2>Deleting it</h2>
