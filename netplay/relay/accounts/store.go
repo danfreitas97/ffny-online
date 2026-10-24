@@ -53,6 +53,7 @@ type Store struct {
 	tickets   map[string]ticket         // ranked tickets by hash (not saved)
 	pairings  map[string]*rankedPairing // ranked matches the relay started (not saved)
 	pairDays  map[string]int            // ranked games per pair today (not saved)
+	drops     []string                  // why matches were dropped since the last TakeDrops (not saved)
 	dirty     bool
 }
 

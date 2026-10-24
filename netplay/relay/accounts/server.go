@@ -446,7 +446,10 @@ func (s *Server) Internal() http.Handler {
 // Settle counts finished matches; the service calls it every few seconds.
 func (s *Server) Settle() {
 	if counted, dropped := s.store.Settle(s.now()); counted+dropped > 0 {
-		log.Printf("accounts: %d match(es) counted, %d dropped (reports disagreed)", counted, dropped)
+		log.Printf("accounts: %d match(es) counted, %d dropped", counted, dropped)
+		for _, why := range s.store.TakeDrops() {
+			log.Printf("accounts: dropped: %s", why)
+		}
 	}
 }
 

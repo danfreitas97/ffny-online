@@ -261,8 +261,12 @@ func (s *Store) Settle(now time.Time) (counted, dropped int) {
 			continue
 		}
 		delete(s.pending, key)
-		if !s.settle(key, p, now) {
+		if why := s.settle(key, p, now); why != "" {
 			dropped++
+			if len(s.drops) < 100 {
+				s.drops = append(s.drops, fmt.Sprintf("%s (%d start, %d result, %d left)", why, len(p.starts),
+					len(p.reports), len(p.lefts)))
+			}
 			continue
 		}
 		counted++
@@ -272,9 +276,9 @@ func (s *Store) Settle(now time.Time) (counted, dropped int) {
 	return counted, dropped
 }
 
-// settle counts one match whose window is over, by the rules at the top of this file. Called
-// with s.mu held.
-func (s *Store) settle(key string, p *pendingMatch, now time.Time) bool {
+// settle counts one match whose window is over, by the rules at the top of this file, and returns
+// "" or why it does not count. Called with s.mu held.
+func (s *Store) settle(key string, p *pendingMatch, now time.Time) string {
 	var lineup string
 	var any MatchReport
 	seat := map[int]int64{}  // slot -> account
@@ -284,13 +288,13 @@ func (s *Store) settle(key string, p *pendingMatch, now time.Time) bool {
 			if lineup == "" {
 				lineup, any = r.lineup(), r
 			} else if r.lineup() != lineup {
-				return false
+				return "the games disagree on the mode, venue or fighters"
 			}
 			if prev, ok := seat[r.You]; ok && prev != id {
-				return false
+				return "two accounts reported the same slot"
 			}
 			if prev, ok := seatOf[id]; ok && prev != r.You {
-				return false
+				return "one account reported two slots"
 			}
 			seat[r.You], seatOf[id] = id, r.You
 		}
@@ -299,14 +303,15 @@ func (s *Store) settle(key string, p *pendingMatch, now time.Time) bool {
 	switch {
 	case len(p.lefts) == 0:
 		if len(p.reports) != len(humans) {
-			return false
+			return fmt.Sprintf("%d of %d players reported a result (not signed in, or the game did not report)",
+				len(p.reports), len(humans))
 		}
 		var want string
 		for _, r := range p.reports {
 			if want == "" {
 				want = r.outcome()
 			} else if r.outcome() != want {
-				return false
+				return "the results disagree on who won"
 			}
 		}
 		for id, r := range p.reports {
@@ -315,7 +320,7 @@ func (s *Store) settle(key string, p *pendingMatch, now time.Time) bool {
 			}
 		}
 		s.rankedResult(key, p, now)
-		return true
+		return ""
 	case len(p.reports) == 0:
 		var claim string
 		var leavers, stayed []int
@@ -323,7 +328,7 @@ func (s *Store) settle(key string, p *pendingMatch, now time.Time) bool {
 			if claim == "" {
 				claim, leavers = slotSet(r.Left), r.Left
 			} else if slotSet(r.Left) != claim {
-				return false
+				return "the games disagree on who left"
 			}
 			stayed = append(stayed, r.You)
 		}
@@ -331,18 +336,18 @@ func (s *Store) settle(key string, p *pendingMatch, now time.Time) bool {
 		for _, l := range leavers {
 			id, ok := seat[l]
 			if !ok {
-				return false // not signed in
+				return "a player who left was not signed in"
 			}
 			if _, said := p.lefts[id]; said {
-				return false // each game says the other left
+				return "each game says the other left"
 			}
 			if _, started := p.starts[id]; !started {
-				return false
+				return "a player who left never reported the start"
 			}
 			lost = append(lost, id)
 		}
 		if len(stayed)+len(leavers) != len(humans) {
-			return false
+			return "not every player who stayed reported the leaver"
 		}
 		for _, id := range lost {
 			r := p.starts[id]
@@ -359,9 +364,18 @@ func (s *Store) settle(key string, p *pendingMatch, now time.Time) bool {
 				}
 			}
 		}
-		return true
+		return ""
 	}
-	return false
+	return "both results and a player leaving were reported"
+}
+
+// TakeDrops returns why matches were dropped since the last call.
+func (s *Store) TakeDrops() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.drops
+	s.drops = nil
+	return d
 }
 
 // ResetStats clears every account's casual statistics (a new leaderboard season) and returns how
