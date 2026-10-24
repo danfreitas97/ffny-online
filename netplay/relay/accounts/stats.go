@@ -10,19 +10,32 @@ import (
 
 // Match results and the statistics made from them.
 //
-// Every signed-in player's game reports the match it just played (POST /api/matches). The
-// reports of one match share a key (room, seed and match id). A match counts once the reports
-// have had ReportWindow to arrive and all of them agree on who played what and who won; then each
-// reporter's own line goes into their statistics. Reports that disagree are dropped. Casual
-// statistics trust the games; ranked play will add the relay's word that the match took place.
+// Every signed-in player's game reports the match it plays (POST /api/matches). The reports of
+// one match share a key (room, seed and match id). Since build 23 a game reports three events:
+// "start" once the fight is loaded, then "result" when it is decided, or "left" naming the
+// players who stopped answering before that (builds before 23 send results only).
+//
+// A match counts once the reports have had ReportWindow to arrive after the first result or
+// "left", and:
+//   - results: every human player reported one, and all of them agree on who played what and who
+//     won. A match against a player who is not signed in, or whose game did not report, does not
+//     count (a second copy of the game, not signed in, gave free wins);
+//   - a player left: everyone who stayed says so and names the same players; each of those left
+//     after reporting the start (so they were signed in) and sent nothing else. They take a loss;
+//     in a one on one the one who stayed takes the win. Leaving before a loss kept records clean
+//     (players' reports, 2026-10-24). When the two games each say the other left, nothing counts.
+// Anything else is dropped. Casual statistics trust the games; ranked adds the relay's pairing.
 
 // ReportWindow is how long the other players' reports may take after the first one.
 const ReportWindow = 45 * time.Second
 
+// StartLifetime is how long a match's start reports wait for a result or a "left".
+const StartLifetime = 2 * time.Hour
+
 // RecentMatches is how many matches an account keeps in its history.
 const RecentMatches = 20
 
-const maxReportsPerHour = 40
+const maxReportsPerHour = 120 // a start and a result per match since build 23
 
 // MatchPlayer is one fighter of a reported match.
 type MatchPlayer struct {
@@ -44,6 +57,21 @@ type MatchReport struct {
 	Players   []MatchPlayer `json:"players"`
 	Winners   []int         `json:"winners"`
 	Draw      bool          `json:"draw"`
+	Event     string        `json:"event,omitempty"` // "start", "left" or "result" ("" is a result)
+	Left      []int         `json:"left,omitempty"`  // "left": the slots that stopped answering
+}
+
+const (
+	eventStart  = "start"
+	eventLeft   = "left"
+	eventResult = "result"
+)
+
+func (r *MatchReport) event() string {
+	if r.Event == "" {
+		return eventResult
+	}
+	return r.Event
 }
 
 // MatchLine is one match in an account's history.
@@ -91,7 +119,56 @@ func (r *MatchReport) valid() bool {
 			return false
 		}
 	}
-	return r.Draw || len(r.Winners) > 0
+	switch r.event() {
+	case eventStart:
+		return len(r.Winners) == 0 && !r.Draw && len(r.Left) == 0
+	case eventLeft:
+		if len(r.Winners) != 0 || r.Draw || len(r.Left) == 0 {
+			return false
+		}
+		for _, l := range r.Left {
+			if !slots[l] || l == r.You {
+				return false
+			}
+		}
+		return true
+	case eventResult:
+		return len(r.Left) == 0 && (r.Draw || len(r.Winners) > 0)
+	}
+	return false
+}
+
+// lineup is what every report of one match must agree on before its outcome: the mode, the venue
+// and who fought as what.
+func (r *MatchReport) lineup() string {
+	var b strings.Builder
+	b.WriteString(strconv.Itoa(r.Mode) + "/" + strconv.Itoa(r.Venue) + "/")
+	ps := append([]MatchPlayer(nil), r.Players...)
+	sort.Slice(ps, func(i, j int) bool { return ps[i].Slot < ps[j].Slot })
+	for _, p := range ps {
+		b.WriteString(strconv.Itoa(p.Slot) + ":" + strconv.Itoa(p.Fighter) + ":" + strconv.FormatBool(p.CPU) + ",")
+	}
+	return b.String()
+}
+
+func (r *MatchReport) humans() []int {
+	var out []int
+	for _, p := range r.Players {
+		if !p.CPU {
+			out = append(out, p.Slot)
+		}
+	}
+	return out
+}
+
+func slotSet(slots []int) string {
+	s := append([]int(nil), slots...)
+	sort.Ints(s)
+	var b strings.Builder
+	for _, x := range s {
+		b.WriteString(strconv.Itoa(x) + ",")
+	}
+	return b.String()
 }
 
 // outcome is what every report of one match must agree on.
@@ -112,8 +189,11 @@ func (r *MatchReport) outcome() string {
 }
 
 type pendingMatch struct {
-	first   time.Time
-	reports map[int64]MatchReport // by account
+	created time.Time             // the first report of any kind
+	first   time.Time             // the first result or "left": the window runs from here
+	starts  map[int64]MatchReport // by account
+	reports map[int64]MatchReport // the results, by account
+	lefts   map[int64]MatchReport // "left", by account
 }
 
 // Report takes a game's report. It returns false when the report is malformed or the account
@@ -145,11 +225,22 @@ func (s *Store) Report(account int64, r MatchReport, now time.Time) bool {
 	}
 	p, ok := s.pending[r.Key]
 	if !ok {
-		p = &pendingMatch{first: now, reports: map[int64]MatchReport{}}
+		p = &pendingMatch{created: now, starts: map[int64]MatchReport{}, reports: map[int64]MatchReport{},
+			lefts: map[int64]MatchReport{}}
 		s.pending[r.Key] = p
 	}
-	if _, dup := p.reports[account]; !dup {
-		p.reports[account] = r
+	into := p.reports
+	switch r.event() {
+	case eventStart:
+		into = p.starts
+	case eventLeft:
+		into = p.lefts
+	}
+	if _, dup := into[account]; !dup {
+		into[account] = r
+	}
+	if r.event() != eventStart && p.first.IsZero() {
+		p.first = now
 	}
 	return true
 }
@@ -160,22 +251,63 @@ func (s *Store) Settle(now time.Time) (counted, dropped int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, p := range s.pending {
+		if p.first.IsZero() {
+			if now.Sub(p.created) > StartLifetime { // started, never decided nor left
+				delete(s.pending, key)
+			}
+			continue
+		}
 		if now.Sub(p.first) < ReportWindow {
 			continue
 		}
 		delete(s.pending, key)
+		if !s.settle(key, p, now) {
+			dropped++
+			continue
+		}
+		counted++
+		s.dirty = true
+	}
+	s.expirePairings(now)
+	return counted, dropped
+}
+
+// settle counts one match whose window is over, by the rules at the top of this file. Called
+// with s.mu held.
+func (s *Store) settle(key string, p *pendingMatch, now time.Time) bool {
+	var lineup string
+	var any MatchReport
+	seat := map[int]int64{}  // slot -> account
+	seatOf := map[int64]int{} // account -> slot
+	for _, group := range []map[int64]MatchReport{p.starts, p.reports, p.lefts} {
+		for id, r := range group {
+			if lineup == "" {
+				lineup, any = r.lineup(), r
+			} else if r.lineup() != lineup {
+				return false
+			}
+			if prev, ok := seat[r.You]; ok && prev != id {
+				return false
+			}
+			if prev, ok := seatOf[id]; ok && prev != r.You {
+				return false
+			}
+			seat[r.You], seatOf[id] = id, r.You
+		}
+	}
+	humans := any.humans()
+	switch {
+	case len(p.lefts) == 0:
+		if len(p.reports) != len(humans) {
+			return false
+		}
 		var want string
-		agree := true
 		for _, r := range p.reports {
 			if want == "" {
 				want = r.outcome()
 			} else if r.outcome() != want {
-				agree = false
+				return false
 			}
-		}
-		if !agree {
-			dropped++
-			continue
 		}
 		for id, r := range p.reports {
 			if a, ok := s.accounts[id]; ok {
@@ -183,11 +315,53 @@ func (s *Store) Settle(now time.Time) (counted, dropped int) {
 			}
 		}
 		s.rankedResult(key, p, now)
-		counted++
-		s.dirty = true
+		return true
+	case len(p.reports) == 0:
+		var claim string
+		var leavers, stayed []int
+		for _, r := range p.lefts {
+			if claim == "" {
+				claim, leavers = slotSet(r.Left), r.Left
+			} else if slotSet(r.Left) != claim {
+				return false
+			}
+			stayed = append(stayed, r.You)
+		}
+		var lost []int64
+		for _, l := range leavers {
+			id, ok := seat[l]
+			if !ok {
+				return false // not signed in
+			}
+			if _, said := p.lefts[id]; said {
+				return false // each game says the other left
+			}
+			if _, started := p.starts[id]; !started {
+				return false
+			}
+			lost = append(lost, id)
+		}
+		if len(stayed)+len(leavers) != len(humans) {
+			return false
+		}
+		for _, id := range lost {
+			r := p.starts[id]
+			r.Winners, r.Draw = stayed, false
+			if a, ok := s.accounts[id]; ok {
+				a.stats().add(r, p.first)
+			}
+		}
+		if len(humans) == 2 && len(any.Players) == 2 {
+			for id, r := range p.lefts {
+				r.Winners = []int{r.You}
+				if a, ok := s.accounts[id]; ok {
+					a.stats().add(r, p.first)
+				}
+			}
+		}
+		return true
 	}
-	s.expirePairings(now)
-	return counted, dropped
+	return false
 }
 
 // ResetStats clears every account's casual statistics (a new leaderboard season) and returns how

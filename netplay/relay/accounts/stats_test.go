@@ -60,6 +60,87 @@ func TestDisagreeingReportsAreDropped(t *testing.T) {
 	}
 }
 
+func event(r MatchReport, kind string, left ...int) MatchReport {
+	r.Event, r.Left = kind, left
+	if kind != eventResult {
+		r.Winners = nil
+	}
+	return r
+}
+
+func TestOneSidedResultDoesNotCount(t *testing.T) {
+	// the opponent not signed in (or its game never reported): no free win
+	store, a, _, now := twoAccounts(t)
+	store.Report(a.ID, oneOnOne("ROOM-3-1", 0, 0), now)
+	if c, d := store.Settle(now.Add(ReportWindow)); c != 0 || d != 1 {
+		t.Fatalf("settle: %d counted, %d dropped", c, d)
+	}
+	if st, _ := store.StatsOf(a.ID); st.Matches != 0 {
+		t.Fatal("a one-sided result counted")
+	}
+}
+
+func TestStartThenResultCounts(t *testing.T) {
+	store, a, b, now := twoAccounts(t)
+	store.Report(a.ID, event(oneOnOne("ROOM-3-2", 0, 0), eventStart), now)
+	store.Report(b.ID, event(oneOnOne("ROOM-3-2", 1, 0), eventStart), now)
+	if c, d := store.Settle(now.Add(10 * time.Minute)); c+d != 0 {
+		t.Fatal("settled on the starts alone")
+	}
+	later := now.Add(3 * time.Minute)
+	store.Report(a.ID, event(oneOnOne("ROOM-3-2", 0, 1), eventResult), later)
+	store.Report(b.ID, oneOnOne("ROOM-3-2", 1, 1), later) // a build-22 style result
+	if c, d := store.Settle(later.Add(ReportWindow)); c != 1 || d != 0 {
+		t.Fatalf("settle: %d counted, %d dropped", c, d)
+	}
+	if sb, _ := store.StatsOf(b.ID); sb.Wins != 1 {
+		t.Fatalf("winner %+v", sb)
+	}
+}
+
+func TestLeaverTakesTheLoss(t *testing.T) {
+	store, a, b, now := twoAccounts(t)
+	store.Report(a.ID, event(oneOnOne("ROOM-3-3", 0, 0), eventStart), now)
+	store.Report(b.ID, event(oneOnOne("ROOM-3-3", 1, 0), eventStart), now)
+	store.Report(a.ID, event(oneOnOne("ROOM-3-3", 0, 0), eventLeft, 1), now.Add(time.Minute))
+	if c, d := store.Settle(now.Add(time.Minute + ReportWindow)); c != 1 || d != 0 {
+		t.Fatalf("settle: %d counted, %d dropped", c, d)
+	}
+	sa, _ := store.StatsOf(a.ID)
+	sb, _ := store.StatsOf(b.ID)
+	if sa.Wins != 1 || sb.Losses != 1 || sb.Recent[0].Result != "loss" || sb.Recent[0].Opponents[0] != "Masa" {
+		t.Fatalf("stayed %+v, left %+v", sa, sb)
+	}
+}
+
+func TestLeaverWithoutStartOrBothClaimingCountsNothing(t *testing.T) {
+	// the one who left never said it started (not signed in): nothing
+	store, a, b, now := twoAccounts(t)
+	store.Report(a.ID, event(oneOnOne("ROOM-3-4", 0, 0), eventStart), now)
+	store.Report(a.ID, event(oneOnOne("ROOM-3-4", 0, 0), eventLeft, 1), now)
+	// each game says the other one left (the connection between them broke): nothing
+	store.Report(a.ID, event(oneOnOne("ROOM-3-5", 0, 0), eventStart), now)
+	store.Report(b.ID, event(oneOnOne("ROOM-3-5", 1, 0), eventStart), now)
+	store.Report(a.ID, event(oneOnOne("ROOM-3-5", 0, 0), eventLeft, 1), now)
+	store.Report(b.ID, event(oneOnOne("ROOM-3-5", 1, 0), eventLeft, 0), now)
+	// a result and a "left" for one match disagree: nothing
+	store.Report(a.ID, event(oneOnOne("ROOM-3-6", 0, 0), eventStart), now)
+	store.Report(b.ID, event(oneOnOne("ROOM-3-6", 1, 0), eventStart), now)
+	store.Report(a.ID, event(oneOnOne("ROOM-3-6", 0, 0), eventLeft, 1), now)
+	store.Report(b.ID, oneOnOne("ROOM-3-6", 1, 1), now)
+	if c, d := store.Settle(now.Add(ReportWindow)); c != 0 || d != 3 {
+		t.Fatalf("settle: %d counted, %d dropped", c, d)
+	}
+	for _, id := range []int64{a.ID, b.ID} {
+		if st, _ := store.StatsOf(id); st.Matches != 0 {
+			t.Fatalf("account %d: %+v", id, st)
+		}
+	}
+	if store.Report(a.ID, event(oneOnOne("ROOM-3-7", 0, 0), eventLeft, 0), now) {
+		t.Fatal("took a report that says its own player left")
+	}
+}
+
 func TestBadReportsAndFlooding(t *testing.T) {
 	store, a, _, now := twoAccounts(t)
 	bad := oneOnOne("ROOM-1-3", 3, 0) // reporter not in the match
@@ -192,6 +273,7 @@ func TestLeaderboardPages(t *testing.T) {
 		for k := 0; k < i+3; k++ {
 			key := "ROOM" + string(rune('A'+i)) + "-" + string(rune('a'+k)) + "-1"
 			store.Report(id, oneOnOne(key, 0, 0), now)
+			store.Report(ids[(i+1)%len(ids)], oneOnOne(key, 1, 0), now)
 		}
 	}
 	store.Settle(now.Add(ReportWindow))
