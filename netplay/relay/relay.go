@@ -25,6 +25,11 @@ type Config struct {
 	VoteTime          time.Duration // length of the venue vote (default 15 s)
 	PlayTimeout       time.Duration // a match without every OVER returns to the lobby after this (default 30 min)
 
+	// King of the Hill (koth.go).
+	KothReadyTime  time.Duration // a called player who is not ready after this is skipped (default 20 s)
+	KothResultWait time.Duration // after one fighter's RESULT, how long to wait for the other's (default 10 s)
+	KothAwayAfter  int           // skips in a row after which a player is away (default 2)
+
 	// Ranked enables the ranked queue (RANKED); the Server sets it when it has an account
 	// service to check tickets with. Off, RANKED is answered QUEUE refused.
 	Ranked bool
@@ -70,6 +75,15 @@ func (c *Config) setDefaults() {
 	}
 	if c.PlayTimeout <= 0 {
 		c.PlayTimeout = 30 * time.Minute
+	}
+	if c.KothReadyTime <= 0 {
+		c.KothReadyTime = 20 * time.Second
+	}
+	if c.KothResultWait <= 0 {
+		c.KothResultWait = 10 * time.Second
+	}
+	if c.KothAwayAfter <= 0 {
+		c.KothAwayAfter = 2
 	}
 	if c.Rand == nil {
 		c.Rand = rand.Reader
@@ -123,13 +137,18 @@ type client struct {
 
 	queue   *queued // in the ranked queue (ranked.go), nil if not
 	account int64   // the account the account service vouched for (ranked), 0 none
+
+	caps  uint32 // from CAPS; only a client with CapKoth enters a King of the Hill room
+	wins  int    // King of the Hill: fights won in this room
+	skips int    // King of the Hill: called and not ready in time, in a row
+	away  bool   // King of the Hill: skipped KothAwayAfter times; not called until READY 1
 }
 
-// room holds up to MaxSlots clients.
+// room holds up to MaxSlots clients (a King of the Hill room up to MaxKothSlots).
 type room struct {
 	code     RoomCode
 	build    Build
-	slots    [MaxSlots]*client
+	slots    [MaxKothSlots]*client
 	created  time.Time
 	seq      uint64 // creation order, for "newest first" and "oldest"
 	everFull bool   // a second player has joined at some point
@@ -149,6 +168,9 @@ type room struct {
 	// to the account service while they hold the two paired accounts.
 	ranked         bool
 	rankedAccounts [2]int64
+
+	// koth is the King of the Hill state (koth.go); nil in every other room.
+	koth *hill
 }
 
 // source is the rate-limit state of one source IP (IPv6: one /64).
@@ -258,12 +280,10 @@ func (r *Relay) handle(now time.Time, from netip.AddrPort, b []byte) []Packet {
 		if c.room == nil {
 			return nil // in the lobby: nobody to forward to
 		}
-		// Forwarded to every other member of the room, whatever its phase.
+		// Forwarded to every other member of the room, whatever its phase (a King of the
+		// Hill room: see hillRecipients).
 		var data []byte
-		for _, o := range c.room.members() {
-			if o == c {
-				continue
-			}
+		for _, o := range r.recipients(c) {
 			if data == nil {
 				if data, err = Encode(ServerData{From: c.slot, Payload: m.Payload}); err != nil {
 					return nil
@@ -351,7 +371,7 @@ func (r *Relay) hello(now time.Time, from netip.AddrPort, src *source, h Hello, 
 		}
 		// In a legacy room HELLO mode 1 joins as slot 1 only: if the guest slot
 		// is taken the room is full, even when the host has left (see README).
-		slot, code := rm.joinable(h.Build)
+		slot, code := rm.joinable(h.Build, false) // no CAPS before HELLO: never a King of the Hill room
 		if code != 0 {
 			return r.errorTo(from, code, reqLen)
 		}
@@ -571,6 +591,9 @@ func (r *Relay) newRoom(now time.Time, b Build, s RoomSettings, legacy bool) (*r
 	}
 	r.roomSeq++
 	rm := &room{code: code, build: b, created: now, seq: r.roomSeq, legacy: legacy, settings: s.clone()}
+	if IsKoth(s.Mode) && !legacy {
+		rm.koth = newHill()
+	}
 	r.rooms[code] = rm
 	return rm, nil
 }

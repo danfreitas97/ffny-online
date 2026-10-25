@@ -53,7 +53,7 @@ func (rm *room) freeSlot() (uint8, bool) {
 	if rm.legacy {
 		return SlotGuest, rm.slots[SlotGuest] == nil
 	}
-	for i := 0; i < int(rm.settings.Max) && i < MaxSlots; i++ {
+	for i := 0; i < int(rm.settings.Max) && i < len(rm.slots); i++ {
 		if rm.slots[i] == nil {
 			return uint8(i), true
 		}
@@ -61,15 +61,23 @@ func (rm *room) freeSlot() (uint8, bool) {
 	return 0, false
 }
 
-// joinable checks whether a client with build b may join now. It returns the
-// slot, or the ERROR code: 2 room full, 3 build mismatch, 8 not in phase 0.
-func (rm *room) joinable(b Build) (uint8, uint8) {
+// joinable checks whether a client with build b (koth: it announced CapKoth) may join now. It
+// returns the slot, or the ERROR code: 2 room full, 3 build mismatch, 8 not in phase 0 or a
+// King of the Hill room for a client without CapKoth. A King of the Hill room takes players in
+// every phase (they join the back of the line and watch).
+func (rm *room) joinable(b Build, koth bool) (uint8, uint8) {
 	slot, ok := rm.freeSlot()
 	if !ok {
 		return 0, ErrRoomFull
 	}
 	if subtle.ConstantTimeCompare(rm.build[:], b[:]) != 1 {
 		return 0, ErrBuildMismatch
+	}
+	if rm.koth != nil {
+		if !koth {
+			return 0, ErrNotAllowed
+		}
+		return slot, 0
 	}
 	if rm.phase != PhaseLobby {
 		return 0, ErrNotAllowed
@@ -82,13 +90,16 @@ func (rm *room) place(c *client, slot uint8) {
 	rm.slots[slot] = c
 	c.room, c.slot = rm, slot
 	c.ready, c.vote, c.over = false, VoteNone, false
+	if rm.koth != nil {
+		rm.koth.join(c)
+	}
 }
 
 // pairPeer is the other member of a full room of two (PEER is sent in rooms
 // whose max is 2, as in protocol v1), or nil.
 func (c *client) pairPeer() *client {
 	rm := c.room
-	if rm == nil || rm.settings.Max != 2 {
+	if rm == nil || rm.settings.Max != 2 || rm.koth != nil {
 		return nil
 	}
 	for _, o := range rm.slots {
@@ -133,7 +144,7 @@ func (r *Relay) joined(now time.Time, rm *room, c *client) []Packet {
 // OVER; an empty room is deleted at once.
 func (r *Relay) leaveRoom(now time.Time, c *client, reason string) []Packet {
 	rm, slot := c.room, c.slot
-	twoRoom := rm.settings.Max == 2
+	twoRoom := rm.settings.Max == 2 && rm.koth == nil
 	rm.slots[slot] = nil
 	c.room, c.slot = nil, SlotNone
 	c.ready, c.vote, c.over = false, VoteNone, false
@@ -142,6 +153,10 @@ func (r *Relay) leaveRoom(now time.Time, c *client, reason string) []Packet {
 		delete(r.rooms, rm.code)
 		r.cfg.Logf("room %s closed (empty)", rm.code)
 		return nil
+	}
+	if rm.koth != nil {
+		r.hillLeft(now, rm, c, slot)
+		return r.changed(now, rm)
 	}
 	var out []Packet
 	if twoRoom {
@@ -164,6 +179,9 @@ func (r *Relay) leaveRoom(now time.Time, c *client, reason string) []Packet {
 // vote once at least two players are present and all are ready, then it sends
 // ROOM to every lobby member.
 func (r *Relay) changed(now time.Time, rm *room) []Packet {
+	if rm.koth != nil {
+		return append(r.hillAdvance(now, rm), r.broadcast(now, rm)...)
+	}
 	if rm.phase == PhaseLobby && rm.count() >= MinPlayers && rm.all(func(c *client) bool { return c.ready }) {
 		rm.candidates = r.drawCandidates(rm.settings.Pool)
 		rm.phase = PhaseVoting
@@ -176,12 +194,43 @@ func (r *Relay) changed(now time.Time, rm *room) []Packet {
 	return r.broadcast(now, rm)
 }
 
-// broadcast sends ROOM to every lobby member of rm.
+// broadcast sends ROOM to every lobby member of rm (in a King of the Hill room ROOM and HILL).
 func (r *Relay) broadcast(now time.Time, rm *room) []Packet {
 	var out []Packet
+	var hill []byte
+	if rm.koth != nil {
+		hill = mustEncode(r.hillState(now, rm))
+	}
 	for _, c := range rm.members() {
 		if c.lobby {
 			out = append(out, r.roomTo(now, c))
+			if hill != nil {
+				out = append(out, Packet{To: c.addr, Data: hill})
+			}
+		}
+	}
+	return out
+}
+
+// stateTo is ROOM for c alone, and in a King of the Hill room HILL after it.
+func (r *Relay) stateTo(now time.Time, c *client) []Packet {
+	out := []Packet{r.roomTo(now, c)}
+	if c.room.koth != nil {
+		out = append(out, Packet{To: c.addr, Data: mustEncode(r.hillState(now, c.room))})
+	}
+	return out
+}
+
+// recipients are the members a DATA from c goes to: every other member, except in a King of
+// the Hill room (hillRecipients).
+func (r *Relay) recipients(c *client) []*client {
+	if c.room.koth != nil {
+		return r.hillRecipients(c)
+	}
+	var out []*client
+	for _, o := range c.room.members() {
+		if o != c {
+			out = append(out, o)
 		}
 	}
 	return out
@@ -226,26 +275,7 @@ func (r *Relay) roomState(now time.Time, rm *room, you uint8) RoomState {
 // endVote picks the venue (most votes; ties at random), sends START with a
 // fresh seed to every lobby member and enters phase 2.
 func (r *Relay) endVote(now time.Time, rm *room) []Packet {
-	tally := make([]int, len(rm.candidates))
-	for _, c := range rm.members() {
-		if int(c.vote) < len(tally) {
-			tally[c.vote]++
-		}
-	}
-	best := 0
-	for _, n := range tally {
-		best = max(best, n)
-	}
-	var tied []int
-	for i, n := range tally {
-		if n == best {
-			tied = append(tied, i)
-		}
-	}
-	venue := uint8(0)
-	if len(tied) > 0 {
-		venue = rm.candidates[tied[r.intn(len(tied))]]
-	}
+	venue := r.votedVenue(rm)
 
 	var seed [4]byte
 	_, _ = io.ReadFull(r.cfg.Rand, seed[:]) // on failure the seed is 0; never happens with crypto/rand
@@ -269,6 +299,31 @@ func (r *Relay) endVote(now time.Time, rm *room) []Packet {
 	return append(out, r.broadcast(now, rm)...)
 }
 
+// votedVenue is the candidate with the most votes among the members' votes (ties at random).
+func (r *Relay) votedVenue(rm *room) uint8 {
+	tally := make([]int, len(rm.candidates))
+	for _, c := range rm.members() {
+		if int(c.vote) < len(tally) {
+			tally[c.vote]++
+		}
+	}
+	best := 0
+	for _, n := range tally {
+		best = max(best, n)
+	}
+	var tied []int
+	for i, n := range tally {
+		if n == best {
+			tied = append(tied, i)
+		}
+	}
+	venue := uint8(0)
+	if len(tied) > 0 {
+		venue = rm.candidates[tied[r.intn(len(tied))]]
+	}
+	return venue
+}
+
 // toLobby returns rm to phase 0 with every ready flag and vote cleared.
 func (r *Relay) toLobby(rm *room, why string) {
 	rm.phase = PhaseLobby
@@ -283,6 +338,9 @@ func (r *Relay) toLobby(rm *room, why string) {
 // goes out on every tick until then, for the countdown), and a match returns
 // to the lobby after PlayTimeout.
 func (r *Relay) tickRoom(now time.Time, rm *room) []Packet {
+	if rm.koth != nil {
+		return r.tickHill(now, rm)
+	}
 	switch rm.phase {
 	case PhaseVoting:
 		if !now.Before(rm.voteEnd) {
@@ -313,6 +371,17 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 		return r.who(c)
 	case Ranked:
 		return r.ranked(now, c, m, reqLen)
+	case Caps:
+		c.caps = m.Caps
+		return []Packet{{To: c.addr, Data: mustEncode(RelayCapsMsg{Caps: RelayCaps})}}
+	case Result:
+		if c.room == nil {
+			return r.errorTo(c.addr, ErrRoomState, reqLen)
+		}
+		if c.room.koth == nil {
+			return r.errorTo(c.addr, ErrNotAllowed, reqLen)
+		}
+		return r.hillResult(now, c, m)
 	case Create:
 		r.dequeue(c)
 		return r.create(now, c, m.Settings, reqLen)
@@ -322,13 +391,13 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 			if c.room.code != m.Room {
 				return r.errorTo(c.addr, ErrRoomState, reqLen) // already in another room
 			}
-			return []Packet{r.roomTo(now, c)} // a retry: its ROOM may have been lost
+			return r.stateTo(now, c) // a retry: its ROOM may have been lost
 		}
 		rm := r.rooms[m.Room]
 		if rm == nil {
 			return r.errorTo(c.addr, ErrRoomNotFound, reqLen)
 		}
-		slot, code := rm.joinable(c.build)
+		slot, code := rm.joinable(c.build, c.caps&CapKoth != 0)
 		if code != 0 {
 			return r.errorTo(c.addr, code, reqLen)
 		}
@@ -343,6 +412,9 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 		rm := c.room
 		if rm == nil {
 			return r.errorTo(c.addr, ErrRoomState, reqLen)
+		}
+		if rm.koth != nil {
+			return r.hillReady(now, c, m)
 		}
 		if rm.phase != PhaseLobby {
 			return r.errorTo(c.addr, ErrNotAllowed, reqLen)
@@ -370,6 +442,9 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 		if rm == nil {
 			return r.errorTo(c.addr, ErrRoomState, reqLen)
 		}
+		if rm.koth != nil {
+			return r.stateTo(now, c) // a King of the Hill fight ends with RESULT
+		}
 		if rm.phase != PhasePlaying {
 			return []Packet{r.roomTo(now, c)} // a late or repeated OVER: nothing to do
 		}
@@ -387,7 +462,7 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 // a fresh ROOM about that room and changes nothing: requests are idempotent,
 // and this is a retry whose first ROOM was lost.
 func (r *Relay) alreadyInRoom(now time.Time, c *client) []Packet {
-	return []Packet{r.roomTo(now, c)}
+	return r.stateTo(now, c)
 }
 
 // list answers LIST with the public rooms of the client's build, newest
@@ -395,7 +470,10 @@ func (r *Relay) alreadyInRoom(now time.Time, c *client) []Packet {
 func (r *Relay) list(c *client, m List) []Packet {
 	var rooms []*room
 	for _, rm := range r.rooms {
-		if rm.settings.Public == 1 && rm.build == c.build && (m.Mode == ModeAny || rm.settings.Mode == m.Mode) {
+		if rm.koth != nil && c.caps&CapKoth == 0 {
+			continue // a client without King of the Hill never sees such a room
+		}
+		if rm.settings.Public == 1 && rm.build == c.build && modeMatches(m.Mode, rm.settings.Mode) {
 			rooms = append(rooms, rm)
 		}
 	}
@@ -428,7 +506,7 @@ func (r *Relay) who(c *client) []Packet {
 		state := PlayerLobby
 		if o.room != nil {
 			state = PlayerRoom
-			if o.room.phase == PhasePlaying {
+			if o.room.phase == PhasePlaying && (o.room.koth == nil || o.room.koth.fighting(o)) {
 				state = PlayerPlaying
 			}
 		}
@@ -460,6 +538,9 @@ func (r *Relay) create(now time.Time, c *client, s RoomSettings, reqLen int) []P
 	if !validName(s.Name) {
 		return r.errorTo(c.addr, ErrBadName, reqLen)
 	}
+	if IsKoth(s.Mode) && c.caps&CapKoth == 0 {
+		return r.errorTo(c.addr, ErrNotAllowed, reqLen)
+	}
 	if len(r.rooms) >= r.cfg.MaxRooms {
 		return r.errorTo(c.addr, ErrServerFull, reqLen)
 	}
@@ -479,6 +560,9 @@ func (r *Relay) create(now time.Time, c *client, s RoomSettings, reqLen int) []P
 func (r *Relay) quick(now time.Time, c *client, m Quick, reqLen int) []Packet {
 	if c.room != nil {
 		return r.alreadyInRoom(now, c)
+	}
+	if IsKoth(m.Mode) {
+		return r.quickHill(now, c, m, reqLen)
 	}
 	var best *room
 	for _, rm := range r.rooms {
@@ -525,17 +609,23 @@ func (r *Relay) setSettings(now time.Time, c *client, s RoomSettings, reqLen int
 	if !validName(s.Name) {
 		return r.errorTo(c.addr, ErrBadName, reqLen)
 	}
+	if IsKoth(s.Mode) != (rm.koth != nil) {
+		return r.errorTo(c.addr, ErrNotAllowed, reqLen) // a room cannot become or stop being King of the Hill
+	}
 	for _, o := range rm.members() {
 		if o.slot >= s.Max {
 			return r.errorTo(c.addr, ErrNotAllowed, reqLen) // max below an occupied slot
 		}
 	}
 	if rm.settings.equal(s) {
-		return []Packet{r.roomTo(now, c)}
+		return r.stateTo(now, c)
 	}
 	rm.settings = s.clone()
 	for _, o := range rm.members() {
 		o.ready = false
+	}
+	if rm.koth != nil {
+		rm.koth.recall() // the called pair is called again under the new rules
 	}
 	r.cfg.Logf("room %s settings changed public=%d mode=%d max=%d", rm.code, s.Public, s.Mode, s.Max)
 	return r.changed(now, rm)
@@ -548,6 +638,9 @@ func (r *Relay) vote(now time.Time, c *client, choice uint8, reqLen int) []Packe
 	rm := c.room
 	if rm == nil {
 		return r.errorTo(c.addr, ErrRoomState, reqLen)
+	}
+	if rm.koth != nil {
+		return r.hillVote(now, c, choice, reqLen)
 	}
 	switch rm.phase {
 	case PhasePlaying:
