@@ -32,7 +32,14 @@ type Config struct {
 	DiscordAPI   string   // https://discord.com/api (tests point it elsewhere)
 	DiscordAuth  string   // https://discord.com/oauth2/authorize
 	Reports      *Reports // bug reports (POST /api/report); nil: off
+	// The FFNY Online bot's token and our Discord server: a player's nickname there becomes their name in the
+	// game and on the leaderboard (empty: off).
+	BotToken string
+	GuildID  string
 }
+
+// NickRefresh is how often a player's nickname on our Discord server is looked up again at most.
+const NickRefresh = 5 * time.Minute
 
 // LoginLifetime is how long a sign-in may take in the browser.
 const LoginLifetime = 10 * time.Minute
@@ -56,6 +63,7 @@ type Server struct {
 	logins  map[string]*pending // key: login (SHA-256 of the launcher's secret)
 	byState map[string]string   // OAuth state -> login
 	reports *Reports
+	nickAt  map[int64]time.Time // when each account's nickname was last looked up
 }
 
 // NewServer makes the service for a store.
@@ -67,7 +75,87 @@ func NewServer(cfg Config, store *Store) *Server {
 		cfg.DiscordAuth = "https://discord.com/oauth2/authorize"
 	}
 	return &Server{cfg: cfg, store: store, client: &http.Client{Timeout: 15 * time.Second}, now: time.Now,
-		logins: map[string]*pending{}, byState: map[string]string{}, reports: cfg.Reports}
+		logins: map[string]*pending{}, byState: map[string]string{}, reports: cfg.Reports, nickAt: map[int64]time.Time{}}
+}
+
+// guildNick asks Discord, as the bot, for a member's nickname on our server: "" when they have none or are not
+// a member (404).
+func (s *Server) guildNick(ctx context.Context, discordID string) (string, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", s.cfg.DiscordAPI+"/guilds/"+s.cfg.GuildID+"/members/"+discordID, nil)
+	req.Header.Set("Authorization", "Bot "+s.cfg.BotToken)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var m struct {
+		Nick *string `json:"nick"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return "", err
+	}
+	if m.Nick == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(*m.Nick), nil
+}
+
+// refreshNick looks the account's server nickname up again (at most every NickRefresh unless forced) and
+// returns the account as it is now.
+func (s *Server) refreshNick(ctx context.Context, a Account, force bool) Account {
+	if s.cfg.BotToken == "" || s.cfg.GuildID == "" || a.DiscordID == "" {
+		return a
+	}
+	s.mu.Lock()
+	last, seen := s.nickAt[a.ID]
+	if !force && seen && s.now().Sub(last) < NickRefresh {
+		s.mu.Unlock()
+		return a
+	}
+	s.nickAt[a.ID] = s.now()
+	s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	nick, err := s.guildNick(ctx, a.DiscordID)
+	if err != nil {
+		log.Printf("accounts: nickname of account %d: %v", a.ID, err)
+		return a
+	}
+	b, changed := s.store.SetNick(a.ID, nick)
+	if changed {
+		log.Printf("accounts: account %d shows a new name (server nickname or display name)", a.ID)
+	}
+	return b
+}
+
+// RefreshNicks looks up the nicknames of the accounts seen in the last 60 days, one a second, so the leaderboard
+// follows renames of players who do not start the game. Runs until ctx ends; call it in a goroutine.
+func (s *Server) RefreshNicks(ctx context.Context, every time.Duration) {
+	if s.cfg.BotToken == "" || s.cfg.GuildID == "" {
+		return
+	}
+	for {
+		for _, id := range s.store.RecentAccounts(s.now().Add(-60 * 24 * time.Hour)) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+			s.refreshNick(ctx, Account{ID: id, DiscordID: s.store.DiscordIDOf(id)}, false)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
 }
 
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -168,6 +256,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		name = user.Username
 	}
 	a := s.store.Upsert(user.ID, user.Username, name, user.Avatar, s.now())
+	a = s.refreshNick(r.Context(), a, true)
 	s.mu.Lock()
 	p.account = a.ID
 	s.mu.Unlock()
@@ -288,7 +377,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not signed in"})
 		return
 	}
-	writeJSON(w, http.StatusOK, public(a))
+	writeJSON(w, http.StatusOK, public(s.refreshNick(r.Context(), a, false)))
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -486,7 +575,7 @@ func htmlHead(title string) string {
 const privacyText = `<h1>Privacy</h1>
 <p>FFNY Online is an unofficial, non-commercial fan project. Signing in is optional; online play works without an account.</p>
 <h2>What is stored when you sign in with Discord</h2>
-<ul><li>your Discord user id, username, display name and avatar id, so the game can show who you are;</li>
+<ul><li>your Discord user id, username, display name and avatar id, and your nickname on the FFNY Online Discord server if you set one (it is the name the game and the leaderboard show), so the game can show who you are;</li>
 <li>when the account was made and last used;</li>
 <li>a session for each launcher you signed in with (stored only as a hash);</li>
 <li>the results of the online matches you play while signed in: wins, losses, the fighters you used, and your last 20 matches with the venue and your opponents' names.</li></ul>

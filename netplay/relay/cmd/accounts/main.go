@@ -29,6 +29,8 @@ func main() {
 	secretFile := flag.String("client-secret-file", "", "file holding the Discord client secret")
 	internal := flag.String("internal-listen", "127.0.0.1:8091", "local address for the Discord bot (empty: off)")
 	reportDir := flag.String("reports", "", "folder for the players' bug reports (empty: off)")
+	botTokenFile := flag.String("bot-token-file", "", "file holding the FFNY Online bot's token: server nicknames become player names (empty: off)")
+	guildID := flag.String("guild-id", "", "our Discord server's id, for the nicknames")
 	resetStats := flag.Bool("reset-stats", false, "clear every account's casual statistics in -data (a new leaderboard season), save and exit; stop the service first")
 	flag.Parse()
 
@@ -59,13 +61,21 @@ func main() {
 			log.Fatalf("accounts: reports: %v", err)
 		}
 	}
+	var botToken []byte
+	if *botTokenFile != "" {
+		if botToken, err = os.ReadFile(*botTokenFile); err != nil {
+			log.Fatalf("accounts: bot token: %v", err)
+		}
+	}
 	srv := accounts.NewServer(accounts.Config{PublicURL: strings.TrimRight(*publicURL, "/"), ClientID: *clientID,
-		ClientSecret: strings.TrimSpace(string(secret)), Reports: reports}, store)
+		ClientSecret: strings.TrimSpace(string(secret)), Reports: reports,
+		BotToken: strings.TrimSpace(string(botToken)), GuildID: strings.TrimSpace(*guildID)}, store)
 	httpSrv := &http.Server{Addr: *listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 2 * time.Minute, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go srv.RefreshNicks(ctx, 30*time.Minute) // server nicknames: renames reach the leaderboard
 	go func() {
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()

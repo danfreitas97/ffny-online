@@ -21,7 +21,9 @@ type Account struct {
 	ID        int64        `json:"id"`
 	DiscordID string       `json:"discord_id"`
 	Username  string       `json:"username"`
-	Name      string       `json:"name"` // Discord's display name, or the username
+	Name      string       `json:"name"`             // what the game and the leaderboard show: Nick, else Global, else Username
+	Global    string       `json:"global,omitempty"` // Discord's display name (empty: none, or an account from before)
+	Nick      string       `json:"nick,omitempty"`   // the nickname on the FFNY Online Discord server
 	Avatar    string       `json:"avatar,omitempty"`
 	Created   time.Time    `json:"created"`
 	LastSeen  time.Time    `json:"last_seen"`
@@ -139,9 +141,67 @@ func (s *Store) Upsert(discordID, username, name, avatar string, now time.Time) 
 		s.byDiscord[discordID] = id
 	}
 	a := s.accounts[id]
-	a.Username, a.Name, a.Avatar, a.LastSeen = username, name, avatar, now
+	a.Username, a.Global, a.Avatar, a.LastSeen = username, name, avatar, now
+	a.Name = a.shownName()
 	s.dirty = true
 	return *a
+}
+
+// shownName is the server nickname, else the display name, else the username.
+func (a *Account) shownName() string {
+	switch {
+	case a.Nick != "":
+		return a.Nick
+	case a.Global != "":
+		return a.Global
+	case a.Username != "":
+		return a.Username
+	}
+	return a.Name
+}
+
+// SetNick records the account's nickname on our Discord server ("" when it has none or left) and returns the
+// account and whether its shown name changed.
+func (s *Store) SetNick(id int64, nick string) (Account, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.accounts[id]
+	if !ok {
+		return Account{}, false
+	}
+	if a.Global == "" && a.Nick == "" && a.Name != a.Username {
+		a.Global = a.Name // an account from before display names were kept apart
+	}
+	old, oldNick := a.Name, a.Nick
+	a.Nick = nick
+	a.Name = a.shownName()
+	if a.Name != old || a.Nick != oldNick {
+		s.dirty = true
+	}
+	return *a, a.Name != old
+}
+
+// RecentAccounts lists the ids of the accounts seen since a time (for the nickname refresh).
+func (s *Store) RecentAccounts(since time.Time) []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ids []int64
+	for id, a := range s.accounts {
+		if !a.LastSeen.Before(since) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// DiscordIDOf returns an account's Discord user id.
+func (s *Store) DiscordIDOf(id int64) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a, ok := s.accounts[id]; ok {
+		return a.DiscordID
+	}
+	return ""
 }
 
 // NewSession gives an account a session and returns its token (shown once, stored hashed).
