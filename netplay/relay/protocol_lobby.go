@@ -16,7 +16,7 @@ const (
 	VoteNone    uint8 = 0xFF // ROOM per-player `voted`: not yet
 	FighterNone uint8 = 0xFF // ROOM per-player `fighter` before the first READY (server default)
 
-	MaxSlots      = 4  // players per room, upper bound of Settings.max
+	MaxSlots      = 4  // players per room, upper bound of Settings.max (King of the Hill: MaxKothSlots)
 	MinPlayers    = 2  // lower bound of Settings.max, and players needed to start a vote
 	MaxPool       = 32 // venues in Settings.pool
 	MaxCandidates = 3  // venues drawn from the pool for a vote
@@ -106,7 +106,7 @@ type RoomSettings struct {
 	Name   string  // 1..24 bytes of UTF-8 (the server answers ERROR 4 otherwise)
 	Public uint8   // 1: listed and found by QUICK; 0: join by code only
 	Mode   uint8   // front-end match type; never ModeAny
-	Max    uint8   // players, 2..4
+	Max    uint8   // players, 2..4 (King of the Hill: 2..10)
 	Rounds uint8   // 0 = the game's default
 	Pool   []uint8 // 1..32 venue feIDs to vote on
 }
@@ -133,7 +133,7 @@ func (s RoomSettings) clone() RoomSettings {
 // decoder drops a Settings block that fails it; the name is checked by the
 // server (ERROR 4), as for HELLO.
 func (s RoomSettings) validShape() bool {
-	return s.Public <= 1 && s.Mode != ModeAny && s.Max >= MinPlayers && s.Max <= MaxSlots &&
+	return s.Public <= 1 && s.Mode != ModeAny && s.Max >= MinPlayers && int(s.Max) <= maxPlayers(s.Mode) &&
 		len(s.Pool) >= 1 && len(s.Pool) <= MaxPool
 }
 
@@ -541,7 +541,7 @@ func decodeLobbyClient(t MsgType, body []byte) (Message, error) {
 		m = Join{Token: tok, Room: c.room()}
 	case TypeQuick:
 		q := Quick{Token: tok, Mode: c.u8(), Max: c.u8()}
-		if q.Mode == ModeAny || q.Max < MinPlayers || q.Max > MaxSlots {
+		if q.Mode == ModeAny || q.Max < MinPlayers || int(q.Max) > maxPlayers(q.Mode) {
 			return nil, ErrMalformed
 		}
 		m = q
@@ -571,7 +571,11 @@ func decodeLobbyClient(t MsgType, body []byte) (Message, error) {
 		rk.Fighter = c.u8()
 		m = rk
 	default:
-		return nil, ErrMalformed
+		km, ok := decodeKothClient(t, tok, c)
+		if !ok {
+			return nil, ErrMalformed
+		}
+		m = km
 	}
 	if !c.end() {
 		return nil, ErrMalformed
@@ -628,13 +632,13 @@ func decodeLobbyServer(t MsgType, body []byte) (Message, error) {
 		st.Candidates = c.list(nc)
 		st.Votes = c.list(nc)
 		st.MsLeft = c.u16()
-		np := int(c.u8())
-		if np > MaxSlots {
+		np, slots := int(c.u8()), maxPlayers(st.Settings.Mode)
+		if np > slots {
 			return nil, ErrMalformed
 		}
 		for i := 0; i < np && c.ok; i++ {
 			p := RoomPlayer{Slot: c.u8(), Name: c.str(), Ready: c.u8(), Fighter: c.u8(), Voted: c.u8()}
-			if p.Slot >= MaxSlots || p.Ready > 1 || (p.Voted != VoteNone && int(p.Voted) >= nc) {
+			if int(p.Slot) >= slots || p.Ready > 1 || (p.Voted != VoteNone && int(p.Voted) >= nc) {
 				return nil, ErrMalformed
 			}
 			st.Players = append(st.Players, p)
@@ -651,7 +655,11 @@ func decodeLobbyServer(t MsgType, body []byte) (Message, error) {
 		}
 		m = s
 	default:
-		return nil, ErrMalformed
+		km, ok := decodeKothServer(t, c)
+		if !ok {
+			return nil, ErrMalformed
+		}
+		m = km
 	}
 	if !c.end() {
 		return nil, ErrMalformed
