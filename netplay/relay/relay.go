@@ -30,6 +30,11 @@ type Config struct {
 	KothResultWait time.Duration // after one fighter's RESULT, how long to wait for the other's (default 10 s)
 	KothAwayAfter  int           // skips in a row after which a player is away (default 2)
 
+	// PublishedBuild returns the newest published build number (the updates folder's latest.json), or 0
+	// when unknown: clients of an older build may not enter the lobby or start rooms and matches any more.
+	// Nil: no check.
+	PublishedBuild func() uint32
+
 	// Ranked enables the ranked queue (RANKED); the Server sets it when it has an account
 	// service to check tickets with. Off, RANKED is answered QUEUE refused.
 	Ranked bool
@@ -122,7 +127,8 @@ type client struct {
 	slot     uint8 // SlotNone while in the lobby
 	name     string
 	build    Build
-	room     *room // nil while in the lobby
+	buildNo  uint32 // the build number the HELLO said (0: a build before 26)
+	room     *room  // nil while in the lobby
 	lastSeen time.Time
 	id       string // anonymised address, for logs only
 	welcome  []byte // the encoded WELCOME, re-sent on a repeated HELLO
@@ -318,6 +324,22 @@ func (r *Relay) handle(now time.Time, from netip.AddrPort, b []byte) []Packet {
 }
 
 // hello handles HELLO: an idempotent re-send, a create, a join, or a lobby entry.
+// outdated says whether a client of build number b is older than the published build. Builds before
+// FirstNumberedBuild say no number (b == 0); they pass until that build is published.
+func (r *Relay) outdated(b uint32) bool {
+	if r.cfg.PublishedBuild == nil {
+		return false
+	}
+	p := r.cfg.PublishedBuild()
+	if p == 0 {
+		return false
+	}
+	if b == 0 {
+		return p >= FirstNumberedBuild
+	}
+	return b < p
+}
+
 func (r *Relay) hello(now time.Time, from netip.AddrPort, src *source, h Hello, reqLen int) []Packet {
 	// A repeated HELLO from an address that already has a token gets the same
 	// WELCOME (and the PEER, if the room of two is full, since that may have
@@ -343,6 +365,9 @@ func (r *Relay) hello(now time.Time, from netip.AddrPort, src *source, h Hello, 
 	}
 	if len(r.clients) >= r.cfg.MaxClients {
 		return r.errorTo(from, ErrServerFull, reqLen)
+	}
+	if r.outdated(h.BuildNo) {
+		return r.errorTo(from, ErrUpdateRequired, reqLen)
 	}
 
 	switch h.Mode {
@@ -396,7 +421,7 @@ func (r *Relay) hello(now time.Time, from netip.AddrPort, src *source, h Hello, 
 // newClient registers a client with a fresh random token, in slot of rm, or
 // in the lobby when rm is nil.
 func (r *Relay) newClient(now time.Time, from netip.AddrPort, h Hello, rm *room, slot uint8) (*client, error) {
-	c := &client{addr: from, slot: SlotNone, name: h.Name, build: h.Build, lastSeen: now, id: r.anon(from),
+	c := &client{addr: from, slot: SlotNone, name: h.Name, build: h.Build, buildNo: h.BuildNo, lastSeen: now, id: r.anon(from),
 		fighter: FighterNone, vote: VoteNone}
 	if _, err := io.ReadFull(r.cfg.Rand, c.token[:]); err != nil {
 		return nil, err

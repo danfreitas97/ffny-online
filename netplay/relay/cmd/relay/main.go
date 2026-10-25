@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -111,6 +113,17 @@ func main() {
 		cfg.Accounts = relay.AccountsHTTP{Base: *accountsURL, Client: &http.Client{Timeout: 10 * time.Second}}
 		log.Printf("relay: ranked play on, accounts at %s", *accountsURL)
 	}
+	// The published build: older builds may not start online sessions, rooms or matches.
+	var published atomic.Uint32
+	if *updatesDir != "" {
+		readPublished(filepath.Join(*updatesDir, "latest.json"), &published)
+		cfg.Relay.PublishedBuild = published.Load
+		go func() {
+			for range time.Tick(30 * time.Second) {
+				readPublished(filepath.Join(*updatesDir, "latest.json"), &published)
+			}
+		}()
+	}
 	srv, err := relay.NewServer(cfg)
 	if err != nil {
 		log.Fatalf("relay: %v", err)
@@ -129,4 +142,22 @@ func main() {
 	}
 	rooms, clients := srv.Snapshot()
 	log.Printf("relay: shut down (dropping %d rooms, %d clients)", rooms, clients)
+}
+
+// readPublished keeps the build number of the published update (latest.json's "build"); an unreadable or
+// unsigned-looking file leaves the last value.
+func readPublished(path string, out *atomic.Uint32) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var m struct {
+		Build uint32 `json:"build"`
+	}
+	if json.Unmarshal(raw, &m) != nil || m.Build == 0 {
+		return
+	}
+	if old := out.Swap(m.Build); old != m.Build {
+		log.Printf("relay: published build %d: older builds may not start online play", m.Build)
+	}
 }

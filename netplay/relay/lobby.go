@@ -370,6 +370,9 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 	case Who:
 		return r.who(c)
 	case Ranked:
+		if r.outdated(c.buildNo) {
+			return r.errorTo(c.addr, ErrUpdateRequired, reqLen)
+		}
 		return r.ranked(now, c, m, reqLen)
 	case Caps:
 		c.caps = m.Caps
@@ -384,9 +387,15 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 		return r.hillResult(now, c, m)
 	case Create:
 		r.dequeue(c)
+		if r.outdated(c.buildNo) { // a new build came out while this client was in the lobby
+			return r.errorTo(c.addr, ErrUpdateRequired, reqLen)
+		}
 		return r.create(now, c, m.Settings, reqLen)
 	case Join:
 		r.dequeue(c)
+		if r.outdated(c.buildNo) {
+			return r.errorTo(c.addr, ErrUpdateRequired, reqLen)
+		}
 		if c.room != nil {
 			if c.room.code != m.Room {
 				return r.errorTo(c.addr, ErrRoomState, reqLen) // already in another room
@@ -405,6 +414,9 @@ func (r *Relay) lobbyRequest(now time.Time, c *client, m lobbyRequest, reqLen in
 		return r.joined(now, rm, c)
 	case Quick:
 		r.dequeue(c)
+		if r.outdated(c.buildNo) {
+			return r.errorTo(c.addr, ErrUpdateRequired, reqLen)
+		}
 		return r.quick(now, c, m, reqLen)
 	case SetSettings:
 		return r.setSettings(now, c, m.Settings, reqLen)

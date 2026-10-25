@@ -71,21 +71,25 @@ const (
 	ErrServerFull    uint8 = 5
 	ErrRateLimited   uint8 = 6
 	ErrUnknownToken  uint8 = 7
+	// ErrUpdateRequired: a newer build is published (the updates folder's latest.json); this one may not
+	// start sessions, rooms or matches any more (a match it is in plays to its end).
+	ErrUpdateRequired uint8 = 10
 )
 
 // ErrorText is the human-readable text the server puts in each ERROR. Every
 // text is at most 14 bytes, so an ERROR (8 + 14 = 22 bytes) is never larger
 // than the smallest possible HELLO (22 bytes) that can trigger it.
 var ErrorText = map[uint8]string{
-	ErrRoomNotFound:  "room not found",
-	ErrRoomFull:      "room full",
-	ErrBuildMismatch: "build mismatch",
-	ErrBadName:       "bad name",
-	ErrServerFull:    "server full",
-	ErrRateLimited:   "rate limited",
-	ErrUnknownToken:  "unknown token",
-	ErrNotAllowed:    "not allowed",
-	ErrRoomState:     "in room/lobby",
+	ErrRoomNotFound:   "room not found",
+	ErrRoomFull:       "room full",
+	ErrBuildMismatch:  "build mismatch",
+	ErrBadName:        "bad name",
+	ErrServerFull:     "server full",
+	ErrRateLimited:    "rate limited",
+	ErrUnknownToken:   "unknown token",
+	ErrUpdateRequired: "update needed",
+	ErrNotAllowed:     "not allowed",
+	ErrRoomState:      "in room/lobby",
 }
 
 // Token is the 8-byte session token the server hands out in WELCOME.
@@ -136,11 +140,16 @@ type Message interface {
 // Hello asks to create (ModeCreate) or join (ModeJoin) a room.
 // Name is kept as raw bytes as received; the server validates it (ERROR 4).
 type Hello struct {
-	Mode  uint8
-	Room  RoomCode // zeros when creating
-	Build Build
-	Name  string
+	Mode    uint8
+	Room    RoomCode // zeros when creating
+	Build   Build
+	Name    string
+	BuildNo uint32 // the FFNY Online build number, after the name since build 26 (0: an older build)
 }
+
+// FirstNumberedBuild is the first build whose HELLO says its build number. Older builds send none and are
+// let in only while the published build is older than this one.
+const FirstNumberedBuild = 26
 
 // ClientData carries an opaque payload from a client to its peer.
 type ClientData struct {
@@ -220,7 +229,11 @@ func (m Hello) appendBody(b []byte) ([]byte, error) {
 	b = append(b, m.Mode)
 	b = append(b, m.Room[:]...)
 	b = append(b, m.Build[:]...)
-	return appendString(b, m.Name)
+	b, err := appendString(b, m.Name)
+	if err != nil || m.BuildNo == 0 {
+		return b, err
+	}
+	return binary.LittleEndian.AppendUint32(b, m.BuildNo), nil
 }
 
 func (m ClientData) appendBody(b []byte) ([]byte, error) {
@@ -333,7 +346,12 @@ func DecodeClient(b []byte) (Message, error) {
 		}
 		copy(h.Room[:], body[1:7])
 		copy(h.Build[:], body[7:15])
-		name, ok := readTrailingString(body[15:])
+		rest := body[15:]
+		if n := int(rest[0]); len(rest) == 1+n+4 { // since build 26: u32 build number after the name
+			h.BuildNo = binary.LittleEndian.Uint32(rest[1+n:])
+			rest = rest[:1+n]
+		}
+		name, ok := readTrailingString(rest)
 		if !ok {
 			return nil, ErrMalformed
 		}
